@@ -1,0 +1,15 @@
+<vbox id="ll-preferences" xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul" xmlns:html="http://www.w3.org/1999/xhtml">
+  <groupbox>
+    <html:h2>Literature Library</html:h2>
+    <html:button onclick="Zotero.LiteratureLibrary.openManager()">打开知识库管理器 / MinerU 设置</html:button>
+  </groupbox>
+  <groupbox>
+    <html:h3>MinerU API Key</html:h3>
+    <html:input id="ll-pref-key" type="password" placeholder="新的 MinerU Key" autocomplete="off" style="width:360px"/>
+    <html:label>生成日期（可选） <html:input id="ll-pref-issued" type="date"/></html:label>
+    <html:label>到期日期（可选） <html:input id="ll-pref-expiry" type="date"/></html:label>
+    <html:button onclick="(async()=>{try{let d=this.ownerDocument;let s=await Zotero.LiteratureLibrary.library.credentials.save({key:d.getElementById('ll-pref-key').value,issuedAt:d.getElementById('ll-pref-issued').value,expiresAt:d.getElementById('ll-pref-expiry').value});d.getElementById('ll-pref-key').value='';d.getElementById('ll-pref-status').textContent=s.state==='configured'?'已保存，尚未验证':s.state;await Zotero.LiteratureLibrary.library.resume()}catch(e){this.ownerDocument.getElementById('ll-pref-status').textContent=e.message}})()">保存 / 替换</html:button>
+    <html:button onclick="(async()=>{await Zotero.LiteratureLibrary.library.credentials.save({clear:true});this.ownerDocument.getElementById('ll-pref-status').textContent='已清除'})()">清除</html:button>
+    <html:div id="ll-pref-status" role="status"></html:div>
+  </groupbox>
+</vbox>

@@ -1,0 +1,19 @@
+{
+  "addons": {
+    "literature-library@local.zotero": {
+      "updates": [
+        {
+          "version": "0.1.0",
+          "update_link": "https://github.com/lixvqing01/zotero-literature-library/releases/download/v0.1.0/literature-library-0.1.0.xpi",
+          "update_hash": "sha256:2229d183204cd67eeaf3a3efeec248f4986f74c5a377a698559b110c246eb5f6",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "8.0",
+              "strict_max_version": "10.*"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

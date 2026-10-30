@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "Literature Library",
+  "version": "0.1.0",
+  "description": "MinerU Markdown, local embeddings, and layered literature access for agents.",
+  "author": "Literature Library Contributors",
+  "homepage_url": "https://github.com/lixvqing01/zotero-literature-library",
+  "applications": {
+    "zotero": {
+      "id": "literature-library@local.zotero",
+      "update_url": "https://raw.githubusercontent.com/lixvqing01/zotero-literature-library/main/updates.json",
+      "strict_min_version": "8.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

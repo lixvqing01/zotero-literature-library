@@ -1,0 +1,22 @@
+{
+  "name": "zotero-literature-library",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "preview": "node scripts/preview.mjs"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "fflate": "^0.8.2",
+    "lucide": "^0.468.0",
+    "parse5": "^8.0.1",
+    "typescript": "^5.9.0"
+  }
+}
