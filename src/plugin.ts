@@ -1,4 +1,5 @@
 import { Library } from './library';
+import { VERSION } from './version';
 import { registerEndpoints } from './agent';
 import { publicError } from './core';
 import { registerManagerLink } from './addon-manager';
@@ -16,6 +17,10 @@ let pluginID = '';
 let statusColumn: string;
 let columnTimer: any;
 let columnStatus = new Map<string, string>();
+const stateLabels: Record<string, string> = { ready: '已入库', metadata: '书目已存', stale: '待更新', queued: '排队中',
+  waiting_file: '等待 PDF', submitting: '提交解析', uploading: '上传中', pending: '云端排队', running: '解析中',
+  converting: '转换中', download: '下载结果', embedding: '向量化', retry: '稍后重试',
+  blocked_credentials: '等待有效 Key', blocked_cloud: '等待启用上传', blocked_model: '等待模型', failed: '失败' };
 
 function mainWindow() { return Zotero.getMainWindow(); }
 function report(error: unknown) {
@@ -31,7 +36,7 @@ export async function start({ id, rootURI }: any) {
   const profile = PathUtils.profileDir || Services.dirsvc.get('ProfD', Ci.nsIFile).path;
   library = new Library(PathUtils.join(profile, 'literature-library'), win);
   await library.init();
-  (Zotero as any).LiteratureLibrary = { library, openManager, version: '0.1.0' };
+  (Zotero as any).LiteratureLibrary = { library, openManager, version: VERSION };
   unregister = registerEndpoints(library);
   unregisterManagerLink = registerManagerLink(id, openManager);
   statusColumn = Zotero.ItemTreeManager.registerColumn({ pluginID: id, dataKey: 'literatureLibrary', label: '知识库',
@@ -62,8 +67,11 @@ export async function start({ id, rootURI }: any) {
     if (columnTimer) win.clearTimeout(columnTimer);
     columnTimer = win.setTimeout(async () => {
       const docs = await library.list();
-      columnStatus = new Map(docs.flatMap(doc => [[`${doc.libraryID}:${doc.itemKey}`, doc.state],
-        ...(doc.attachmentKey ? [[`${doc.libraryID}:${doc.attachmentKey}`, doc.state]] : [])] as [string, string][]));
+      columnStatus = new Map(docs.flatMap(doc => {
+        const label = stateLabels[doc.taskState || doc.state] || doc.state;
+        return [[`${doc.libraryID}:${doc.itemKey}`, label],
+          ...(doc.attachmentKey ? [[`${doc.libraryID}:${doc.attachmentKey}`, label]] : [])] as [string, string][];
+      }));
       for (const w of Zotero.getMainWindows()) w.ZoteroPane?.itemsView?.tree?.invalidate?.();
     }, 800);
   });

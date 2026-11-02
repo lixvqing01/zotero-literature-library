@@ -1,4 +1,4 @@
-import { AppError, boundedInt, cosine, keywordScore, parseDocument, publicError,
+import { AppError, boundedInt, publicError,
   type DocumentRecord, type Layer } from './core';
 import { Credentials } from './credentials';
 import { MinerUClient, safeRemoteURL } from './mineru';
@@ -7,13 +7,14 @@ import { Inference } from './inference';
 import { Store, type Job } from './store';
 import { modelFingerprint } from './models';
 import { CitationBridge } from './citation-bridge';
+import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
+import { ACTIVE, canResume, resumedJob, requiresRebuild, type ResumeReason } from './queue';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
   embeddingsEnabled: boolean; mcpEnabled: boolean; ocr: boolean; }
 const DEFAULTS: Settings = { autoIndex: false, cloudEnabled: false, model: 'qwen',
   embeddingsEnabled: true, mcpEnabled: false, ocr: true };
 const AUTH_ERRORS = ['MINERU_KEY_MISSING', 'MINERU_TOKEN_EXPIRED', 'MINERU_TOKEN_INVALID', 'MINERU_AUTH_FAILED'];
-const ACTIVE = ['queued', 'waiting_file', 'submitting', 'uploading', 'pending', 'running', 'converting', 'download', 'embedding', 'retry'];
 export class Library {
   store: Store;
   credentials: Credentials;
@@ -73,7 +74,8 @@ export class Library {
   onChange(fn: () => void) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   changed() { for (const listener of this.listeners) { try { listener(); } catch {} } }
   async saveSettings(input: Partial<Settings>) {
-    const wasAuto = this.settings.autoIndex;
+    const wasAuto = this.settings.autoIndex, wasCloud = this.settings.cloudEnabled;
+    const previousModel = this.settings.model, wereEmbeddings = this.settings.embeddingsEnabled;
     const safe: Partial<Settings> = {};
     for (const k of ['autoIndex', 'cloudEnabled', 'embeddingsEnabled', 'mcpEnabled', 'ocr'] as const)
       if (typeof input[k] === 'boolean') safe[k] = input[k];
@@ -83,9 +85,11 @@ export class Library {
     if (!wasAuto && this.settings.autoIndex) {
       await this.store.set('autoScanSince', new Date().toISOString().slice(0, 19).replace('T', ' '));
     }
+    if (!wasCloud && this.settings.cloudEnabled) await this.resume('cloud');
+    if (previousModel !== this.settings.model || wereEmbeddings && !this.settings.embeddingsEnabled) await this.resume('model');
     return this.settings;
   }
-  modelFingerprint() { return modelFingerprint(this.settings.model); }
+  modelFingerprint() { return modelFingerprint(this.settings.model) + ':layers-v2'; }
   parserFingerprint() { return `mineru-v4:vlm:table:formula:ocr=${this.settings.ocr}:schema1`; }
   async snapshot(item: any, attachment?: any): Promise<DocumentRecord> {
     const group = Zotero.Libraries.get(item.libraryID)?.libraryType === 'group'
@@ -126,12 +130,12 @@ export class Library {
     if (!item || item.deleted) throw new AppError({ code: 'ITEM_NOT_FOUND', message: 'Zotero 条目不存在或已在回收站。', retryable: false });
     return item;
   }
-  async enqueueItem(item: any, force = false) {
-    const task = this.enqueueChain.then(() => this.enqueueItemInternal(item, force));
+  async enqueueItem(item: any, force = false, automatic = false) {
+    const task = this.enqueueChain.then(() => this.enqueueItemInternal(item, force, automatic));
     this.enqueueChain = task.catch(() => {});
     return task;
   }
-  private async enqueueItemInternal(item: any, force = false) {
+  private async enqueueItemInternal(item: any, force = false, automatic = false) {
     if (item.isNote?.() || item.isAnnotation?.()) return [];
     if (item.isAttachment?.() && item.parentID) item = await Zotero.Items.getAsync(item.parentID);
     if (!item || item.deleted) return [];
@@ -145,6 +149,11 @@ export class Library {
       const existing = jobs.find(j => j.documentID === fresh.id);
       if (existing && ACTIVE.includes(existing.state)) {
         results.push({ document_id: fresh.id, job_id: existing.id, state: 'already_queued' }); continue;
+      }
+      // Periodic scans must never turn a paused/uncertain cloud submission into a
+      // new upload. Explicit rebuild remains available after the user checks it.
+      if (existing && !['done', 'skipped'].includes(existing.state) && (automatic || requiresRebuild(existing) && !force)) {
+        results.push({ document_id: fresh.id, job_id: existing.id, state: existing.state, error: existing.error }); continue;
       }
       const old = await this.store.document(fresh.id);
       const doc = old ? { ...old, ...fresh, chunks: old.chunks, sections: old.sections,
@@ -168,14 +177,15 @@ export class Library {
     for (const item of items) result.push(...await this.enqueueItem(item, force));
     return result;
   }
-  async resume() {
+  async resume(reason: ResumeReason = 'manual', jobID?: string) {
+    let resumed = 0;
     for (const job of await this.store.jobs()) {
-      if (['blocked_credentials', 'blocked_cloud', 'failed', 'blocked_model'].includes(job.state)) {
-        job.state = job.retryState || (job.batchID ? 'pending' : 'queued'); job.error = undefined; job.attempts = 0; job.nextRun = Date.now();
-        await this.store.putJob(job);
+      if ((!jobID || job.id === jobID) && canResume(job, reason)) {
+        await this.store.putJob(resumedJob(job)); resumed++;
       }
     }
     this.schedule(); this.changed();
+    return { resumed };
   }
   schedule(delay = 500) {
     if (this.stopped) return;
@@ -218,7 +228,8 @@ export class Library {
           job.pdfHash = await this.hashFile(path);
           if (!job.force && doc.pdfHash === job.pdfHash && doc.parserFingerprint === this.parserFingerprint() && doc.markdown) {
             if (oldMetadataHash === fresh.metadataHash && (!this.settings.embeddingsEnabled || doc.modelFingerprint === this.modelFingerprint())) {
-              doc.state = 'ready'; job.state = 'skipped'; await this.store.commit(doc, job); return;
+              doc.state = 'ready'; doc.error = undefined; job.state = 'skipped'; job.error = undefined;
+              await this.store.commit(doc, job); return;
             }
             job.state = 'embedding';
           } else {
@@ -246,7 +257,8 @@ export class Library {
         } else {
           if (!job.force && doc.indexedAt && oldMetadataHash === fresh.metadataHash
               && (!this.settings.embeddingsEnabled || doc.modelFingerprint === this.modelFingerprint())) {
-            job.state = 'skipped'; await this.store.commit(doc, job); return;
+            doc.state = 'ready'; doc.error = undefined; job.state = 'skipped'; job.error = undefined;
+            await this.store.commit(doc, job); return;
           }
           job.state = 'embedding';
         }
@@ -291,16 +303,18 @@ export class Library {
         await this.store.commit(doc, job);
       }
       if (job.state === 'embedding') {
-        const abstractChunks = doc.abstract ? [{ id: 'abstract', sectionId: 'abstract', text: `${doc.title}\n${doc.abstract}`,
+        const abstractChunks = doc.abstract ? [{ id: 'abstract', sectionId: 'abstract', text: doc.abstract,
           page: null, layer: 'abstract' as Layer }] : [];
-        doc.chunks = [...abstractChunks, ...doc.chunks.filter(c => c.layer !== 'abstract')];
+        doc.chunks = [{ id: 'metadata', sectionId: 'metadata', text: metadataText(doc), page: null, layer: 'metadata' },
+          ...abstractChunks, ...doc.chunks.filter(c => c.layer === 'fulltext')];
         if (this.settings.embeddingsEnabled) {
           const model = this.settings.model, fingerprint = this.modelFingerprint();
           for (let i = 0; i < doc.chunks.length; i += 2) {
             if (this.stopped) return;
             const vectors = await this.inference.embed(model, doc.chunks.slice(i, i + 2).map(c => `${doc!.title}\n${c.text}`));
             vectors.forEach((v, j) => { doc!.chunks[i + j].vector = v; });
-            job.progress = { embedded: Math.min(i + 2, doc.chunks.length), total: doc.chunks.length }; this.changed();
+            job.progress = { embedded: Math.min(i + 2, doc.chunks.length), total: doc.chunks.length };
+            await this.store.putJob(job); this.changed();
           }
           if (this.modelFingerprint() !== fingerprint) throw new AppError({ code: 'MODEL_CHANGED', message: '模型已切换，请重新入库。', retryable: false });
           doc.modelFingerprint = fingerprint;
@@ -332,14 +346,20 @@ export class Library {
     } finally { this.changed(); }
   }
   async status() {
-    const docs = await this.store.documents(), jobs = await this.store.jobs();
+    const docs = await this.store.summaries(), jobs = await this.store.jobs();
     return { settings: this.settings, credentials: this.credentials.status(), model: this.inference.state, citation_handoff: this.citations.status(),
       coverage: { documents: docs.length, abstracts: docs.filter(d => d.abstract).length,
-        fulltext: docs.filter(d => d.markdown).length, vectors: docs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.chunks.some(c => c.vector?.length)).length },
-      queue: jobs, local_only: false, parsing_provider: 'mineru', endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
+        fulltext: docs.filter(d => d.hasFulltext).length, vectors: docs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
+      queue: jobs.map(job => ({ ...job, can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
+      local_only: !this.settings.cloudEnabled, parsing_provider: 'mineru', endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
   }
-  async list() { return (await this.store.documents()).map(({ chunks, sections, markdown, ...doc }) => ({ ...doc,
-    chunkCount: chunks.length, sectionCount: sections.length, hasFulltext: !!markdown })); }
+  async list() {
+    const [docs, jobs] = await Promise.all([this.store.summaries(), this.store.jobs()]);
+    const tasks = new Map(jobs.map(job => [job.documentID, job]));
+    return docs.map(doc => ({ ...doc,
+      taskState: tasks.has(doc.id) && !['done', 'skipped'].includes(tasks.get(doc.id)!.state) ? tasks.get(doc.id)!.state : null,
+      hasCurrentVectors: doc.modelFingerprint === this.modelFingerprint() && doc.hasVectors }));
+  }
   async read(input: any) {
     const doc = await this.store.document(String(input.document_id));
     if (!doc) throw new Error('未找到已入库文献，请提供 document_id。');
@@ -356,63 +376,44 @@ export class Library {
     if (layer === 'notes') {
       const item = await this.resolve(doc.libraryID, doc.itemKey);
       const notes = item.getNotes ? await Zotero.Items.getAsync(item.getNotes()) : [];
-      const texts = notes.map((n: any) => ({ key: n.key, text: String(n.getNote()).replace(/<[^>]*>/g, ' ').slice(0, limit), source: 'user_note' }));
-      return { ...base, notes: texts };
+      const texts = []; let remaining = limit, truncated = false;
+      for (const note of notes) {
+        const content = String(note.getNote()).replace(/<[^>]*>/g, ' ');
+        if (!remaining) { truncated = true; break; }
+        const excerpt = content.slice(0, remaining);
+        texts.push({ key: note.key, text: excerpt, source: 'user_note' });
+        remaining -= excerpt.length; if (excerpt.length < content.length) truncated = true;
+      }
+      return { ...base, notes: texts, truncated };
     }
     if (layer !== 'fulltext') throw new Error('不支持的 layer。');
-    const sections = doc.sections.filter(s => (!input.section_id || s.id === input.section_id)
-      && (!input.page || s.page === input.page));
-    const text = sections.map(s => `## ${s.heading}\n${s.text}`).join('\n');
-    const offset = Math.max(0, Number(input.offset) || 0);
-    return { ...base, text: text.slice(offset, offset + limit), total_chars: text.length,
-      truncated: offset + limit < text.length, next_offset: offset + limit < text.length ? offset + limit : null,
-      source: 'mineru', sections: sections.map(s => ({ id: s.id, page: s.page })),
-      missing: !doc.markdown };
+    return { ...base, ...readFulltext(doc, input) };
   }
   async search(input: any) {
     const query = String(input.query || '').trim();
     if (!query || query.length > 4000) throw new Error('query 长度必须为 1–4000 字符。');
     const layer = input.layer || 'auto';
     if (!['auto', 'metadata', 'abstract', 'fulltext'].includes(layer)) throw new Error('无效检索层。');
+    if (input.mode && !['keyword', 'hybrid', 'semantic'].includes(input.mode)) throw new Error('无效检索模式。');
     const docs = (await this.store.documents()).filter(d => (!input.library_id || d.libraryID === input.library_id)
       && (!input.year || d.year === String(input.year)) && (!input.publication || d.publication.toLowerCase().includes(String(input.publication).toLowerCase())));
     let vector: number[] | undefined, semanticError: any;
+    const indexed = docs.filter(d => d.modelFingerprint === this.modelFingerprint() && searchBlocks(d, layer).some(c => c.vector?.length));
     if (input.mode === 'semantic' || input.mode === 'hybrid') {
-      try { vector = (await this.inference.embed(this.settings.model, [query], true))[0]; }
+      try {
+        if (docs.length && !indexed.length) throw new AppError({ code: 'INDEX_VECTORS_MISSING',
+          message: '当前检索层没有与所选模型匹配的向量，请启用向量化并重新入库。', retryable: false, requires_user_action: true });
+        if (docs.length) vector = (await this.inference.embed(this.settings.model, [query], true))[0];
+      }
       catch (error) { semanticError = publicError(error); if (input.mode === 'semantic') throw error; }
     }
-    const hits: any[] = [];
-    for (const doc of docs) {
-      const metadata = `${doc.title}\n${doc.creators}\n${doc.publication}\n${doc.doi}\n${doc.tags.join(' ')}`;
-      if (layer === 'auto' || layer === 'metadata') {
-        const score = keywordScore(query, metadata);
-        if (score) hits.push({ doc, layer: 'metadata', text: metadata, score, semantic: null, page: null });
-      }
-      const blocks = doc.chunks.filter(c => layer === 'auto' || c.layer === layer);
-      if (!doc.chunks.some(c => c.layer === 'abstract') && doc.abstract && ['auto', 'abstract'].includes(layer))
-        blocks.push({ id: 'abstract', sectionId: 'abstract', text: doc.abstract, page: null, layer: 'abstract' });
-      for (const chunk of blocks) {
-        if (doc.sections.find(s => s.id === chunk.sectionId)?.kind === 'references') continue;
-        const keyword = keywordScore(query, chunk.text);
-        const semantic = vector && chunk.vector && doc.modelFingerprint === this.modelFingerprint() ? cosine(vector, chunk.vector) : null;
-        const score = input.mode === 'semantic' ? semantic ?? -1 : vector ? keyword * 0.4 + Math.max(0, semantic ?? 0) * 0.6 : keyword;
-        if (score > (input.mode === 'semantic' ? 0.1 : 0)) hits.push({ doc, layer: chunk.layer, text: chunk.text, score, semantic, page: chunk.page, section: chunk.sectionId });
-      }
-    }
-    hits.sort((a, b) => b.score - a.score);
-    const seen = new Set<string>();
-    const results = hits.filter(hit => {
-      if (input.granularity === 'passages') return true;
-      if (seen.has(hit.doc.id)) return false; seen.add(hit.doc.id); return true;
-    }).slice(0, boundedInt(input.top_k, 10, 100)).map(hit => ({ document_id: hit.doc.id, item_key: hit.doc.itemKey,
-      library_id: hit.doc.libraryID, title: hit.doc.title, creators: hit.doc.creators, year: hit.doc.year,
-      layer: hit.layer, section_id: hit.section, page: hit.page, snippet: hit.text.slice(0, 900),
-      score: hit.score, semantic_score: hit.semantic,
-      link: hit.page && hit.doc.attachmentKey ? `zotero://open-pdf/${hit.doc.libraryKey}/items/${hit.doc.attachmentKey}?page=${hit.page}`
-        : `zotero://select/${hit.doc.libraryKey}/items/${hit.doc.itemKey}` }));
-    return { results, mode: vector ? input.mode : 'keyword', warning: semanticError, active_model: this.modelFingerprint() };
+    return { results: rankDocuments(docs, { ...input, query, layer }, this.modelFingerprint(), vector),
+      mode: vector ? input.mode : input.mode === 'semantic' && !docs.length ? 'semantic' : 'keyword',
+      warning: semanticError, coverage: { candidates: docs.length, indexed: indexed.length }, active_model: this.modelFingerprint() };
   }
   async reconcile(ids?: number[]) {
+    const scanStarted = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const fullScan = !ids;
     const documents = await this.store.documents();
     for (const doc of documents) {
       const item = await Zotero.Items.getByLibraryAndKeyAsync(doc.libraryID, doc.itemKey);
@@ -431,16 +432,16 @@ export class Library {
         }
       }
       ids = [...affected];
-      await this.store.set('autoScanSince', new Date().toISOString().slice(0, 19).replace('T', ' '));
     }
     if (this.settings.autoIndex && ids) {
       const items = await Zotero.Items.getAsync(ids);
       for (let item of items) {
         if (!item || item.deleted) continue;
         if (item.parentID) item = await Zotero.Items.getAsync(item.parentID);
-        if (item) await this.enqueueItem(item);
+        if (item) await this.enqueueItem(item, false, true);
       }
     }
+    if (this.settings.autoIndex && fullScan) await this.store.set('autoScanSince', scanStarted);
     this.changed();
   }
   async styles() {

@@ -5,6 +5,8 @@ export class Inference {
   private pending = new Map<string, { resolve: (value: number[][]) => void; reject: (error: Error) => void; timer: any }>();
   state: any = { state: 'idle', model: 'qwen', progress: null };
   private listener: any;
+  private startupTimer: any;
+  private rejectStartup?: (error: Error) => void;
   constructor(private window: any, private timerWindow: any, private changed: () => void, private cacheRoot: string) {}
   private async cache(data: any, bridgeToken: string) {
     let cacheResult: any = null;
@@ -26,11 +28,12 @@ export class Inference {
   }
   private init() {
     if (this.ready) return this.ready;
-    this.ready = new Promise((resolve, reject) => {
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.rejectStartup = reject;
       const doc = this.window.document;
       const bridgeToken = Services.uuid.generateUUID().toString();
-      const startupTimer = this.timerWindow.setTimeout(() => reject(new AppError({ code: 'EMBEDDING_HOST_FAILED',
-        message: '本地推理页面未就绪，请重启 Zotero 后重试。', retryable: true })), 30000);
+      const startupTimer = this.startupTimer = this.timerWindow.setTimeout(() => reject(new AppError({ code: 'EMBEDDING_HOST_FAILED',
+        message: '本地推理页面未就绪，请重新加载模型后重试。', retryable: true })), 30000);
       this.frame = doc.createElementNS('http://www.w3.org/1999/xhtml', 'iframe');
       this.frame.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none';
       this.listener = (event: any) => {
@@ -38,7 +41,7 @@ export class Inference {
         if (event.data?.bridgeToken !== bridgeToken || event.data?.source !== 'literature-inference') return;
         const data = event.data;
         if (data.cache) { this.cache(data, bridgeToken).catch(() => {}); return; }
-        if (data.ready) { this.timerWindow.clearTimeout(startupTimer); resolve(); return; }
+        if (data.ready) { this.timerWindow.clearTimeout(startupTimer); this.rejectStartup = undefined; resolve(); return; }
         if (data.progress) { this.state = { ...this.state, state: 'loading', progress: data.progress }; this.changed(); return; }
         const job = this.pending.get(data.id);
         if (job) {
@@ -51,13 +54,14 @@ export class Inference {
           this.state = { state: 'error', message: data.error }; this.changed();
           for (const job of this.pending.values()) { this.timerWindow.clearTimeout(job.timer); job.reject(new Error(data.error)); }
           this.pending.clear();
+          this.close();
         }
       };
       this.window.addEventListener('message', this.listener);
       this.frame.addEventListener('error', () => reject(new Error('推理页面加载失败。')), { once: true });
       this.frame.src = 'chrome://literature-library/content/inference.html#' + encodeURIComponent(bridgeToken);
       doc.documentElement.append(this.frame);
-    });
+    }).catch(error => { this.close(); throw error; });
     return this.ready;
   }
   async embed(model: string, texts: string[], query = false): Promise<number[][]> {
@@ -74,6 +78,9 @@ export class Inference {
     });
   }
   close() {
+    this.timerWindow.clearTimeout(this.startupTimer);
+    const rejectStartup = this.rejectStartup; this.rejectStartup = undefined;
+    rejectStartup?.(new Error('本地推理页面已关闭，可重新加载模型。'));
     if (this.listener) this.window.removeEventListener('message', this.listener);
     for (const job of this.pending.values()) { this.timerWindow.clearTimeout(job.timer); job.reject(new Error('插件已关闭。')); }
     this.pending.clear(); this.frame?.remove();

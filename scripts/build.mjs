@@ -4,6 +4,7 @@ import { join, relative } from 'node:path';
 import { zipSync } from 'fflate';
 
 const out = 'build/addon';
+const { version } = JSON.parse(await readFile('package.json', 'utf8'));
 await mkdir(out, { recursive: true });
 await cp('addon', out, { recursive: true });
 await build({ entryPoints: ['src/plugin.ts'], bundle: true, outfile: `${out}/content/plugin.js`,
@@ -34,5 +35,5 @@ async function collect(dir) {
 }
 await collect(out);
 await mkdir('dist', { recursive: true });
-await writeFile('dist/literature-library-0.1.0.xpi', zipSync(files, { level: 6 }));
-console.log('Built dist/literature-library-0.1.0.xpi');
+await writeFile(`dist/literature-library-${version}.xpi`, zipSync(files, { level: 6 }));
+console.log(`Built dist/literature-library-${version}.xpi`);

@@ -8,7 +8,7 @@ const fixture = {
     model: { state: 'ready', model: 'qwen', progress: null },
     coverage: { documents: 4, abstracts: 4, fulltext: 3, vectors: 2 },
     endpoint: 'http://127.0.0.1:23119/literature-library/mcp',
-    queue: [{ id: 'j1', documentID: 'd4', state: 'running', attempts: 0, progress: { extracted_pages: 8, total_pages: 14 } }]
+    queue: [{ id: 'j2', documentID: 'd3', state: 'blocked_model', can_resume: true, error: { message: '模型下载中断，请重试。' } }, { id: 'j3', documentID: 'd2', state: 'failed', requires_rebuild: true, error: { message: '提交结果未知，请检查 MinerU。' } }, { id: 'j1', documentID: 'd4', state: 'running', attempts: 0, progress: { extracted_pages: 8, total_pages: 14 } }]
   },
   documents: [
     ['d1', 'Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks', 'Patrick Lewis, Ethan Perez', '2020', 'NeurIPS', 'ready'],
@@ -17,9 +17,9 @@ const fixture = {
     ['d4', '面向科学文献的分层检索与证据定位', '陈明, 李华', '2026', '计算机学报', 'metadata']
   ].map(([id, title, creators, year, publication, state], i) => ({ id, title, creators, year, publication, state,
     itemKey: `TEST000${i}`, libraryKey: 'library', abstract: 'We study retrieval and scientific evidence through structured document access. 本研究讨论文献检索与证据定位。',
-    hasFulltext: i < 3, modelFingerprint: i < 2 ? 'qwen:q8' : undefined, tags: [], collections: [],
+    hasFulltext: i < 3, hasCurrentVectors: i < 2, modelFingerprint: i < 2 ? 'qwen:q8' : undefined, tags: [], collections: [],
     markdown: '# Abstract\nA structured literature retrieval study.\n\n# Methods\nMethods and supporting evidence.',
-    sections: [{ id: 's1', heading: 'Abstract', page: 1 }, { id: 's2', heading: 'Methods', page: 3 }] }))
+    chunks: [{ id: 'c1', sectionId: 's2', layer: 'fulltext', page: 3, text: 'Methods and supporting evidence.' }], sections: [{ id: 's1', heading: 'Abstract', page: 1, text: 'A structured literature retrieval study.' }, { id: 's2', heading: 'Methods', page: 3, text: 'Methods and supporting evidence. '.repeat(700) }] }))
 };
 const base = resolve('build/addon/content');
 const server = createServer(async (req, res) => {

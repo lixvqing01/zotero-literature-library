@@ -8,6 +8,20 @@
   };
   const lib = Zotero.LiteratureLibrary.library;
   await check('plugin-startup-and-database', async () => ({ status: await lib.status(), root: lib.root }));
+  await check('summary-migration-and-atomic-updates', async () => {
+    const full = await lib.store.documents(), summaries = await lib.store.summaries();
+    if (full.length !== summaries.length || summaries.some(d => d.chunks || d.markdown || d.sections))
+      throw Error('Existing library summary migration is inconsistent');
+    const source = full[0];
+    if (!source) return { existingDocuments: 0 };
+    const temporary = { ...source, id: 'fixture-summary-migration' };
+    try {
+      await lib.store.putDocument(temporary);
+      if (!(await lib.store.summaries()).some(d => d.id === temporary.id && d.title === source.title)) throw Error('Summary not written');
+    } finally { await lib.store.removeDocument(temporary.id); }
+    if ((await lib.store.summaries()).some(d => d.id === temporary.id)) throw Error('Summary not removed');
+    return { existingDocuments: full.length, summaries: summaries.length, writeAndRemove: true };
+  });
   await check('secure-credential-lifecycle', async () => {
     await lib.credentials.save({ key: 'fixture-not-a-real-mineru-key', issuedAt: '2026-08-01' });
     const before = lib.credentials.status();
@@ -80,7 +94,24 @@
       if(!read.text.includes('Second page'))throw Error('PDF page provenance lost');
       await lib.enqueueItem(item);await wait(['skipped']);
       if(creates!==1||uploads!==1)throw Error('Duplicate source was uploaded');
-      return {expired:true,resumed:true,page:2,creates,uploads,duplicate:'skipped'};
+      const originalJob=(await lib.store.jobs()).find(j=>j.id===queued.job_id);
+      await lib.store.putJob({...originalJob,state:'failed',retryState:'queued',error:{code:'MINERU_SUBMISSION_UNCERTAIN',message:'Fixture uncertain submission',retryable:false}});
+      await lib.resume('credentials'); await lib.resume();
+      const [automatic]=await lib.enqueueItem(item,false,true);
+      const [manual]=await lib.enqueueItem(item);
+      if(automatic.state!=='failed'||manual.state!=='failed')throw Error('Uncertain task was automatically resubmitted');
+      await lib.store.putJob(originalJob);
+      const originalEmbed=lib.inference.embed;
+      try {
+        const saved=await lib.store.document(queued.document_id);saved.modelFingerprint='previous-layer-schema';await lib.store.putDocument(saved);
+        lib.inference.embed=async(_model,texts)=>texts.map(()=>Array.from({length:1024},(_,i)=>i===0?1:0));
+        await lib.saveSettings({embeddingsEnabled:true});
+        await lib.enqueueItem(item);await wait(['done']);
+        if(creates!==1||uploads!==1)throw Error('Model upgrade uploaded an unchanged PDF');
+        const upgraded=await lib.store.document(queued.document_id);
+        if(!upgraded.chunks.some(c=>c.layer==='metadata'&&c.vector?.length===1024))throw Error('Metadata embedding layer missing');
+      }finally {lib.inference.embed=originalEmbed;await lib.saveSettings({embeddingsEnabled:false});}
+      return {expired:true,resumed:true,page:2,creates,uploads,duplicate:'skipped',uncertainNotResubmitted:true,modelUpgradeReusedMarkdown:true};
     } finally {
       lib.mineru.transport=transport;win.fetch=originalFetch;
       await lib.credentials.save({clear:true}); await lib.saveSettings({cloudEnabled:false});
@@ -172,7 +203,7 @@
       }throw Error('Automatic notifier did not ingest new item');
     }finally {await lib.saveSettings({autoIndex:false});}
   });
-  await IOUtils.writeJSON(path, { complete: true, version: Zotero.version, results });
+  await IOUtils.writeJSON(path, { complete: true, version: Zotero.version, pluginVersion: Zotero.LiteratureLibrary.version, results });
 })().catch(async e => {
   await IOUtils.writeJSON(PathUtils.join(Services.dirsvc.get('ProfD', Ci.nsIFile).path, 'integration-fatal.json'), { error: String(e.stack || e) });
 });

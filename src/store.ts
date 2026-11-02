@@ -6,6 +6,10 @@ export interface Job {
   retryState?: string; credentialRevision?: number;
   parserFingerprint?: string;
 }
+export function summarize({ chunks, sections, markdown, ...doc }: DocumentRecord) {
+  return { ...doc, chunkCount: chunks.length, sectionCount: sections.length, hasFulltext: !!markdown,
+    hasVectors: chunks.some(c => !!c.vector?.length) };
+}
 export class Store {
   db: any;
   constructor(public root: string) {}
@@ -15,7 +19,15 @@ export class Store {
     await this.db.queryAsync('PRAGMA journal_mode=WAL');
     await this.db.queryAsync('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     await this.db.queryAsync('CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
+    await this.db.queryAsync('CREATE TABLE IF NOT EXISTS document_summaries (id TEXT PRIMARY KEY, data TEXT NOT NULL)');
     await this.db.queryAsync('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, document_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL)');
+    const missing = await this.db.columnQueryAsync('SELECT data FROM documents WHERE id NOT IN (SELECT id FROM document_summaries)');
+    await this.db.executeTransaction(async () => {
+      for (const raw of missing) {
+        const doc = JSON.parse(raw);
+        await this.db.queryAsync('INSERT INTO document_summaries (id,data) VALUES (?,?)', [doc.id, JSON.stringify(summarize(doc))]);
+      }
+    });
   }
   async get<T>(key: string, fallback: T): Promise<T> {
     const raw = await this.db.valueQueryAsync('SELECT value FROM settings WHERE key=?', [key]);
@@ -31,12 +43,20 @@ export class Store {
     const raw = await this.db.valueQueryAsync('SELECT data FROM documents WHERE id=?', [id]);
     return raw ? JSON.parse(raw) : null;
   }
+  async summaries(): Promise<ReturnType<typeof summarize>[]> {
+    return (await this.db.columnQueryAsync('SELECT data FROM document_summaries')).map((s: string) => JSON.parse(s));
+  }
   async putDocument(doc: DocumentRecord) {
+    await this.db.executeTransaction(() => this.writeDocument(doc));
+  }
+  private async writeDocument(doc: DocumentRecord) {
     await this.db.queryAsync('INSERT OR REPLACE INTO documents (id,data) VALUES (?,?)', [doc.id, JSON.stringify(doc)]);
+    await this.db.queryAsync('INSERT OR REPLACE INTO document_summaries (id,data) VALUES (?,?)', [doc.id, JSON.stringify(summarize(doc))]);
   }
   async removeDocument(id: string) {
     await this.db.executeTransaction(async () => {
       await this.db.queryAsync('DELETE FROM documents WHERE id=?', [id]);
+      await this.db.queryAsync('DELETE FROM document_summaries WHERE id=?', [id]);
       await this.db.queryAsync('DELETE FROM jobs WHERE document_id=?', [id]);
     });
   }
@@ -52,7 +72,7 @@ export class Store {
     await this.db.executeTransaction(async () => {
       const current = await this.db.valueQueryAsync('SELECT id FROM jobs WHERE document_id=?', [job.documentID]);
       if (current !== job.id || !await this.document(doc.id)) return;
-      await this.putDocument(doc); await this.putJob(job);
+      await this.writeDocument(doc); await this.putJob(job);
     });
   }
   async close() { if (this.db) await this.db.closeDatabase(); }
