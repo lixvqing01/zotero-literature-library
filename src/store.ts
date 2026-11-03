@@ -5,6 +5,7 @@ export interface Job {
   force?: boolean; progress?: any; error?: PublicError; createdAt: string;
   retryState?: string; credentialRevision?: number;
   parserFingerprint?: string;
+  uploadCompletedAt?: number; uploadWaitSince?: number; uploadHTTPStatus?: number; pdfBytes?: number;
 }
 export function summarize({ chunks, sections, markdown, ...doc }: DocumentRecord) {
   return { ...doc, chunkCount: chunks.length, sectionCount: sections.length, hasFulltext: !!markdown,

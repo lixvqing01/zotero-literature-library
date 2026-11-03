@@ -1,6 +1,13 @@
 import { AppError, mineruError, redact } from './core';
 export interface TransportResponse { status: number; body: any; }
 export type Transport = (method: string, url: string, body?: unknown, headers?: Record<string, string>) => Promise<TransportResponse>;
+export function validateUploadPDF(bytes: Uint8Array, expectedSize: number) {
+  if (!bytes.length || bytes.length !== expectedSize)
+    throw new AppError({ code: 'PDF_READ_INCOMPLETE', message: '本地 PDF 读取不完整或文件在读取时发生变化，请确认附件已下载完成后重试。', retryable: false });
+  const header = String.fromCharCode(...bytes.subarray(0, 1024));
+  if (!header.includes('%PDF-'))
+    throw new AppError({ code: 'PDF_INVALID_HEADER', message: '附件文件头不是 PDF，可能下载成了网页或错误页面；请在 Zotero 打开原附件检查。', retryable: false });
+}
 export class MinerUClient {
   constructor(private transport: Transport, private credential: () => Promise<{ key: string; revision: number }>,
     private report: (revision: number, error: AppError | null) => Promise<void>) {}

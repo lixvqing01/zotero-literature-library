@@ -45,6 +45,14 @@ try {
   await page.locator('#notification').filter({ hasText: '此任务已重新排队' }).waitFor();
   assert.equal(await page.locator('[data-retry="j2"]').count(), 0);
   assert.equal(await page.locator('[data-rebuild="d2"]').count(), 1);
+  assert.equal(await page.locator('[data-retry="j4"]').textContent(), '恢复查询原任务');
+  assert.equal(await page.locator('[data-rebuild="d1"]').count(), 1);
+  await page.locator('[data-retry="j4"]').click();
+  await page.locator('#notification').filter({ hasText: '已恢复查询原任务，不会重新上传 PDF' }).waitFor();
+  const recovered = page.locator('tr').filter({ hasText: 'Retrieval-Augmented Generation' });
+  await recovered.filter({ hasText: '等待上传确认' }).waitFor();
+  assert.match(await recovered.textContent(), /不会重新上传 PDF/);
+  assert.equal(await page.locator('[data-rebuild="d1"]').count(), 0);
   await page.locator('[data-tab="library"]').click();
   assert.equal(await page.locator('#search-query').inputValue(), 'Attention');
   assert.equal(await page.locator('#search-layer').inputValue(), 'metadata');

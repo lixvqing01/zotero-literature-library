@@ -1,4 +1,5 @@
 import { readFulltext } from './retrieval';
+import { resumedJob, displayJobState, requiresRebuild } from './queue';
 export function previewBridge(fixture: any) {
   return {
     status: async () => fixture.status, list: async () => fixture.documents,
@@ -12,7 +13,10 @@ export function previewBridge(fixture: any) {
         fixture.status.model = { state: 'idle', dimension: null, checkedAt: null };
       return Object.assign(fixture.status.settings, input, { cloudEnabled: true });
     },
-    testCredentials: async () => ({ message: '预览模式不会调用 MinerU。' }), resume: async (id?: string) => { let resumed = 0; for (const job of fixture.status.queue) if (job.can_resume && (!id || job.id === id)) { job.state = 'queued'; job.can_resume = false; resumed++; } return { resumed }; },
+    testCredentials: async () => ({ message: '预览模式不会调用 MinerU。' }), resume: async (id?: string) => { let resumed = 0; for (const job of fixture.status.queue) if (job.can_resume && (!id || job.id === id)) {
+      Object.assign(job, resumedJob(job)); job.displayState = displayJobState(job);
+      job.can_resume = false; job.requires_rebuild = requiresRebuild(job); resumed++;
+    } return { resumed }; },
     reindex: async () => {}, remove: async (id: string) => { fixture.documents = fixture.documents.filter((d: any) => d.id !== id); },
     testEmbeddingModel: async () => { fixture.status.model = { ...fixture.status.model, state: 'ready', checkedAt: new Date().toISOString(), dimension: 384, provider: fixture.status.settings.embeddingProvider, model: fixture.status.settings.embeddingProvider === 'api' ? fixture.status.settings.embeddingApiModel : fixture.status.settings.model }; return fixture.status.model; },
     installAgent: async (target: string) => { if (target === 'codex') fixture.status.agents.codex.configured = true; else fixture.status.agents.claudeCode.configured = true; return { backup: 'preview-only' }; },

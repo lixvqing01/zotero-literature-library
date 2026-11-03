@@ -12,7 +12,8 @@ const fixture = {
     agents: { codex: { configured: false, path: 'C:/Users/You/.codex/config.toml' }, claudeCode: { configured: false, path: 'C:/Users/You/.claude.json' } },
     coverage: { documents: 4, abstracts: 4, fulltext: 3, vectors: 2 },
     endpoint: 'http://127.0.0.1:23119/literature-library/mcp',
-    queue: [{ id: 'j2', documentID: 'd3', state: 'blocked_model', can_resume: true, error: { message: '模型下载中断，请重试。' } }, { id: 'j3', documentID: 'd2', state: 'failed', requires_rebuild: true, error: { message: '提交结果未知，请检查 MinerU。' } }, { id: 'j1', documentID: 'd4', state: 'running', attempts: 0, progress: { extracted_pages: 8, total_pages: 14 } }]
+    queue: [{ id: 'j2', documentID: 'd3', state: 'blocked_model', can_resume: true, error: { message: '模型下载中断，请重试。' } }, { id: 'j3', documentID: 'd2', state: 'failed', requires_rebuild: true, error: { message: '提交结果未知，请检查 MinerU。' } }, { id: 'j1', documentID: 'd4', state: 'running', attempts: 0, progress: { extracted_pages: 8, total_pages: 14 } },
+      { id: 'j4', documentID: 'd1', state: 'failed', batchID: 'fixture-batch', dataID: 'fixture-file', can_resume: true, requires_rebuild: true, error: { code: 'MINERU_UPLOAD_INCOMPLETE', message: '原任务尚未收到完整 PDF，请强制重建；未自动重复上传。' } }]
   },
   documents: [
     ['d1', 'Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks', 'Patrick Lewis, Ethan Perez', '2020', 'NeurIPS', 'ready'],

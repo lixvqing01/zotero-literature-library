@@ -18,7 +18,7 @@ let statusColumn: string;
 let columnTimer: any;
 let columnStatus = new Map<string, string>();
 const stateLabels: Record<string, string> = { ready: '已入库', metadata: '书目已存', stale: '待更新', queued: '排队中',
-  waiting_file: '等待 PDF', submitting: '提交解析', uploading: '上传中', pending: '云端排队', running: '解析中',
+  waiting_file: '等待 PDF', submitting: '提交解析', uploading: '上传中', confirming_upload: '等待上传确认', pending: '云端排队', running: '解析中',
   converting: '转换中', download: '下载结果', embedding: '向量化', retry: '稍后重试',
   blocked_credentials: '等待有效 Key', blocked_cloud: '等待启用上传', blocked_model: '等待模型', failed: '失败' };
 

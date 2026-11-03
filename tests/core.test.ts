@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError, credentialDisplay, expiryDates, mineruError, parseDocument, redact, keywordScore } from '../src/core';
-import { MinerUClient, safeRemoteURL } from '../src/mineru';
+import { MinerUClient, safeRemoteURL, validateUploadPDF } from '../src/mineru';
 import { rpc } from '../src/agent';
 import { CitationBridge } from '../src/citation-bridge';
 import { rankDocuments, readFulltext } from '../src/retrieval';
-import { canResume, resumedJob } from '../src/queue';
+import { canResume, resumedJob, requiresRebuild, displayJobState, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
 import { Library } from '../src/library';
 import { Inference } from '../src/inference';
 import { summarize } from '../src/store';
@@ -14,6 +14,7 @@ import { AgentInstaller, installClaudeConfig, installCodexBlock } from '../src/a
 import { posix } from 'node:path';
 import { isModelCacheURL } from '../src/models';
 import type { DocumentRecord } from '../src/core';
+import type { Job } from '../src/store';
 
 function paper(id: string, title: string, vector?: number[], text = 'Evidence on a different topic.'): DocumentRecord {
   return { id, itemKey: id, libraryID: 1, libraryKey: 'library', attachmentKey: `PDF${id}`, title,
@@ -85,6 +86,146 @@ test('credential and bulk recovery never resubmit uncertain or unrelated failure
     assert.equal(canResume({ ...base, error: { ...base.error, code } }, 'manual'), false);
     assert.equal(canResume({ ...base, error: { ...base.error, code } }, 'credentials'), false);
   }
+});
+
+function uploadFixture(state = 'queued') {
+  const lib: any = Object.create(Library.prototype);
+  let doc = { ...paper('upload', 'Upload fixture'), markdown: undefined, pdfHash: undefined, metadataHash: 'metadata-v1' };
+  let job: Job = { id: 'upload-job', documentID: doc.id, state, attempts: 0, nextRun: 0, createdAt: '' };
+  const calls = { create: 0, upload: 0, poll: [] as string[] };
+  let remoteState = 'waiting-file';
+  const bytes = new TextEncoder().encode('%PDF-1.7\nfixture bytes\n%%EOF');
+  const attachment = { key: doc.attachmentKey, getFilePathAsync: async () => '/fixture/paper.pdf' };
+  lib.store = {
+    document: async () => structuredClone(doc), jobs: async () => [structuredClone(job)],
+    removeDocument: async (id: string) => { assert.match(id, /:metadata$/); },
+    putJob: async (value: Job) => { job = structuredClone(value); },
+    commit: async (value: any, task: Job) => { doc = structuredClone(value); job = structuredClone(task); }
+  };
+  lib.resolve = async (_id: number, key: string) => key === doc.attachmentKey ? attachment : {};
+  lib.snapshot = async () => ({ ...paper('upload', 'Upload fixture'), markdown: undefined, metadataHash: 'metadata-v1' });
+  lib.settings = { cloudEnabled: true, embeddingsEnabled: false, ocr: true };
+  lib.hashFile = async () => 'fixture-hash';
+  lib.credentials = { read: async () => ({ revision: 1 }) };
+  lib.mineru = {
+    create: async () => { calls.create++; return { batchID: 'original-batch', uploadURL: 'https://mineru.net/fixture-upload' }; },
+    poll: async (batch: string, data: string) => { calls.poll.push(`${batch}:${data}`); return { state: remoteState }; }
+  };
+  lib.remoteFetch = async (_url: string, options: any) => {
+    calls.upload++; assert.deepEqual(options.body, bytes); assert.equal(options.method, 'PUT');
+    return { response: { ok: true, status: 200 }, done() {} };
+  };
+  lib.changed = () => {}; lib.schedule = () => {};
+  const root: any = globalThis, originalIO = root.IOUtils;
+  root.IOUtils = { exists: async () => true, stat: async () => ({ size: bytes.length }), read: async () => bytes };
+  return { lib, calls, bytes, job: () => job, doc: () => doc,
+    process: () => lib.process(structuredClone(job)),
+    setJob: (change: Partial<Job>) => { job = { ...job, ...change }; },
+    setRemote: (state: string) => { remoteState = state; }, restore: () => { root.IOUtils = originalIO; } };
+}
+
+test('PDF validation rejects empty, truncated and HTML files before creating a cloud task', async () => {
+  const pdf = new TextEncoder().encode('%PDF-1.7\nfixture');
+  validateUploadPDF(pdf, pdf.length);
+  assert.throws(() => validateUploadPDF(pdf, pdf.length + 1), (e: any) => e.detail.code === 'PDF_READ_INCOMPLETE');
+  for (const bytes of [new Uint8Array(), new TextEncoder().encode('<html>Access denied</html>')]) {
+    const f = uploadFixture();
+    try {
+      (globalThis as any).IOUtils.read = async () => bytes;
+      (globalThis as any).IOUtils.stat = async () => ({ size: bytes.length });
+      await f.process();
+      assert.equal(f.job().state, 'failed');
+      assert.equal(f.job().error?.code, bytes.length ? 'PDF_INVALID_HEADER' : 'PDF_READ_INCOMPLETE');
+      assert.equal(f.calls.create, 0); assert.equal(f.calls.upload, 0);
+    } finally { f.restore(); }
+  }
+});
+
+test('successful upload persists confirmation and waits before the first poll', async () => {
+  const f = uploadFixture();
+  try {
+    const before = Date.now(); await f.process();
+    assert.equal(f.calls.create, 1); assert.equal(f.calls.upload, 1); assert.equal(f.calls.poll.length, 0);
+    assert.equal(f.job().state, 'pending'); assert.equal(displayJobState(f.job()), 'confirming_upload');
+    assert.equal(f.job().uploadHTTPStatus, 200); assert.equal(f.job().pdfBytes, f.bytes.length);
+    assert(f.job().uploadCompletedAt! >= before); assert(f.job().nextRun >= before + 3000);
+  } finally { f.restore(); }
+});
+
+test('repeated waiting-file responses keep the original upload and can advance to parsing', async () => {
+  const f = uploadFixture();
+  try {
+    await f.process(); const identity = `${f.job().batchID}:${f.job().dataID}`;
+    const since = f.job().uploadWaitSince;
+    for (let i = 0; i < 3; i++) {
+      await f.process(); assert.equal(f.job().state, 'pending'); assert.equal(f.job().error, undefined);
+      assert.equal(f.job().attempts, 0); assert.equal(f.job().uploadWaitSince, since);
+    }
+    f.setRemote('running'); await f.process();
+    assert.equal(f.job().state, 'running'); assert.equal(displayJobState(f.job()), 'running');
+    assert.deepEqual(f.calls.poll, Array(4).fill(identity));
+    assert.equal(f.calls.create, 1); assert.equal(f.calls.upload, 1);
+  } finally { f.restore(); }
+});
+
+test('confirmation timeout can resume only the original cloud task without another upload', async () => {
+  const f = uploadFixture();
+  try {
+    await f.process(); const batch = f.job().batchID, dataID = f.job().dataID;
+    f.setJob({ uploadWaitSince: Date.now() - UPLOAD_CONFIRMATION_TIMEOUT - 1 });
+    await f.process();
+    assert.equal(f.job().state, 'failed'); assert.equal(f.job().error?.code, 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT');
+    assert.match(f.job().error!.message, /HTTP 200/); assert.equal(requiresRebuild(f.job()), true);
+    assert.equal(canResume(f.job(), 'manual'), true);
+    for (const reason of ['credentials', 'cloud', 'model'] as const) {
+      assert.equal(canResume(f.job(), reason), false); assert.equal((await f.lib.resume(reason)).resumed, 0);
+    }
+    assert.equal((await f.lib.resume('manual', f.job().id)).resumed, 1);
+    assert.equal(f.job().state, 'pending'); assert.equal(f.doc().error, undefined);
+    assert.equal(f.doc().state, 'pending'); assert.equal(f.job().error, undefined);
+    assert.equal(f.job().batchID, batch); assert.equal(f.job().dataID, dataID);
+    f.setRemote('running'); await f.process();
+    assert.equal(f.job().state, 'running'); assert.equal(f.calls.create, 1); assert.equal(f.calls.upload, 1);
+  } finally { f.restore(); }
+});
+
+test('legacy upload failures resume as polling, while missing remote identity still requires rebuild', () => {
+  const job: Job = { id: 'old', documentID: 'paper', state: 'failed', retryState: 'queued',
+    attempts: 1, nextRun: 0, createdAt: '', batchID: 'old-batch', dataID: 'old-file', pdfHash: 'old-hash',
+    error: { code: 'MINERU_UPLOAD_INCOMPLETE', message: 'Legacy failure', retryable: false } };
+  assert.equal(canResume(job, 'manual'), true); assert.equal(requiresRebuild(job), true);
+  const resumed = resumedJob(job);
+  assert.equal(resumed.state, 'pending'); assert.equal(resumed.error, undefined);
+  assert.equal(resumed.batchID, job.batchID); assert.equal(resumed.dataID, job.dataID); assert.equal(resumed.pdfHash, job.pdfHash);
+  assert.equal(canResume({ ...job, dataID: undefined }, 'manual'), false);
+  assert.equal(canResume({ ...job, batchID: undefined }, 'manual'), false);
+});
+
+test('ordinary enqueue and automatic scans cannot rebuild a legacy upload failure', async () => {
+  const f = uploadFixture('failed');
+  try {
+    f.setJob({ batchID: 'legacy-batch', dataID: 'legacy-file', error: {
+      code: 'MINERU_UPLOAD_INCOMPLETE', message: 'Legacy failure', retryable: false } });
+    f.lib.enqueueChain = Promise.resolve();
+    const item = { isAttachment: () => true, getTags: () => [] };
+    for (const automatic of [false, true]) {
+      const result = await f.lib.enqueueItem(item, false, automatic);
+      assert.equal(result[0].state, 'failed'); assert.equal(f.job().batchID, 'legacy-batch');
+    }
+    assert.equal(f.calls.create, 0); assert.equal(f.calls.upload, 0);
+  } finally { f.restore(); }
+});
+
+test('interrupted uploads with an existing batch are reconciled without claiming upload success', async () => {
+  const f = uploadFixture('pending');
+  try {
+    f.setJob({ batchID: 'interrupted-batch', dataID: 'interrupted-file' });
+    await f.process(); assert.equal(f.job().state, 'pending'); assert.equal(f.job().uploadCompletedAt, undefined);
+    f.setJob({ uploadWaitSince: Date.now() - UPLOAD_CONFIRMATION_TIMEOUT - 1 });
+    await f.process(); assert.equal(f.job().state, 'failed');
+    assert.match(f.job().error!.message, /是否完成尚未确认/); assert.doesNotMatch(f.job().error!.message, /HTTP 200/);
+    assert.equal(f.calls.create, 0); assert.equal(f.calls.upload, 0);
+  } finally { f.restore(); }
 });
 
 test('missing vectors trigger an explicit fallback without downloading a model', async () => {

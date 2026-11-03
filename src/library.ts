@@ -2,14 +2,14 @@ import { AppError, boundedInt, publicError,
   type DocumentRecord, type Layer } from './core';
 import { Credentials, EmbeddingCredentials } from './credentials';
 import { EmbeddingAPI, embeddingURL } from './embedding-api';
-import { MinerUClient, safeRemoteURL } from './mineru';
+import { MinerUClient, safeRemoteURL, validateUploadPDF } from './mineru';
 import { importArchive } from './pdf-results';
 import { Inference } from './inference';
 import { Store, type Job } from './store';
 import { modelFingerprint, type ModelSource } from './models';
 import { CitationBridge } from './citation-bridge';
 import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
-import { ACTIVE, canResume, resumedJob, requiresRebuild, type ResumeReason } from './queue';
+import { ACTIVE, canResume, resumedJob, requiresRebuild, displayJobState, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
 import { AgentInstaller } from './agent-installer';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
@@ -248,7 +248,11 @@ export class Library {
     let resumed = 0;
     for (const job of await this.store.jobs()) {
       if ((!jobID || job.id === jobID) && canResume(job, reason)) {
-        await this.store.putJob(resumedJob(job)); resumed++;
+        const resumedTask = resumedJob(job);
+        const saved = await this.store.document(job.documentID);
+        if (saved) { saved.error = undefined; saved.state = saved.indexedAt ? 'stale' : resumedTask.state; await this.store.commit(saved, resumedTask); }
+        else await this.store.putJob(resumedTask);
+        resumed++;
       }
     }
     this.schedule(); this.changed();
@@ -301,6 +305,9 @@ export class Library {
             job.state = 'embedding';
           } else {
             if (!this.settings.cloudEnabled) throw new AppError({ code: 'MINERU_UPLOAD_DISABLED', message: '请在设置中启用 MinerU PDF 上传后继续。', retryable: false, requires_user_action: true });
+            const bytes = await IOUtils.read(path);
+            validateUploadPDF(bytes, stat.size);
+            job.pdfBytes = bytes.length;
             job.credentialRevision = (await this.credentials.read()).revision;
             job.dataID = `${job.id.replace(/[{}-]/g, '')}_${job.pdfHash.slice(0, 16)}`;
             job.parserFingerprint = this.parserFingerprint(); job.state = 'submitting'; await this.store.putJob(job);
@@ -313,13 +320,18 @@ export class Library {
             }
             job.batchID = task.batchID; job.state = 'uploading'; job.force = false;
             await this.store.putJob(job); this.changed();
-            const bytes = await IOUtils.read(path);
             const transfer = await this.remoteFetch(safeRemoteURL(task.uploadURL), { method: 'PUT', body: bytes,
               credentials: 'omit', redirect: 'error' });
             const response = transfer.response; transfer.done();
             if (!response.ok) throw new AppError({ code: 'MINERU_UPLOAD_FAILED',
-              message: 'PDF 上传未完成，请检查网络或重新提交。', retryable: false });
+              message: `PDF 上传返回 HTTP ${response.status}，请检查网络或重新提交。`, retryable: false });
+            job.uploadHTTPStatus = response.status;
+            job.uploadCompletedAt = Date.now(); job.uploadWaitSince = job.uploadCompletedAt;
             job.state = 'pending'; job.nextRun = Date.now() + 3000;
+            job.progress = { stage: 'upload_confirmation', uploaded_bytes: bytes.length,
+              message: 'PDF 已上传，等待 MinerU 确认接收；将继续查询原任务。' };
+            doc.error = undefined; job.error = undefined;
+            await this.store.commit(doc, job); return;
           }
         } else {
           if (!job.force && doc.indexedAt && oldMetadataHash === fresh.metadataHash
@@ -333,8 +345,19 @@ export class Library {
       if (['pending', 'running', 'converting', 'download', 'uploading'].includes(job.state)) {
         if (!this.settings.cloudEnabled) throw new AppError({ code: 'MINERU_UPLOAD_DISABLED', message: 'MinerU 云端访问已停用。', retryable: false });
         const result = await this.mineru.poll(job.batchID!, job.dataID!);
-        if (result.state === 'waiting-file') throw new AppError({ code: 'MINERU_UPLOAD_INCOMPLETE',
-          message: '原任务尚未收到完整 PDF，请强制重建；未自动重复上传。', retryable: false, requires_user_action: true });
+        if (result.state === 'waiting-file') {
+          job.uploadWaitSince ??= Date.now();
+          if (Date.now() - job.uploadWaitSince >= UPLOAD_CONFIRMATION_TIMEOUT)
+            throw new AppError({ code: 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT', message: job.uploadCompletedAt
+              ? `上传已返回 HTTP ${job.uploadHTTPStatus || '2xx'}，但 MinerU 在 5 分钟内仍未确认文件。可恢复查询原任务；需要重新上传时再重建。`
+              : 'MinerU 仍在等待文件，上次上传是否完成尚未确认。可恢复查询原任务，或检查原任务后重建。',
+              retryable: false, requires_user_action: true });
+          job.state = 'pending'; job.error = undefined; doc.error = undefined;
+          job.progress = { stage: 'upload_confirmation', uploaded_bytes: job.pdfBytes,
+            message: '等待 MinerU 确认上传；将继续查询原任务，不重复上传。' };
+          job.nextRun = Date.now() + 5000;
+          await this.store.commit(doc, job); return;
+        }
         if (result.state !== 'done') {
           job.state = ['pending', 'running', 'converting'].includes(result.state) ? result.state : 'pending';
           job.progress = result.progress; job.nextRun = Date.now() + 5000;
@@ -423,7 +446,7 @@ export class Library {
       model: embeddingModel, inference: this.inference.state, citation_handoff: this.citations.status(),
       coverage: { documents: docs.length, abstracts: docs.filter(d => d.abstract).length,
         fulltext: docs.filter(d => d.hasFulltext).length, vectors: docs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
-      queue: jobs.map(job => ({ ...job, can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
+      queue: jobs.map(job => ({ ...job, displayState: displayJobState(job), can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
       agents: await this.agentInstaller.status(), local_only: false, parsing_provider: 'mineru',
       endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
   }
@@ -431,7 +454,7 @@ export class Library {
     const [docs, jobs] = await Promise.all([this.store.summaries(), this.store.jobs()]);
     const tasks = new Map(jobs.map(job => [job.documentID, job]));
     return docs.map(doc => ({ ...doc,
-      taskState: tasks.has(doc.id) && !['done', 'skipped'].includes(tasks.get(doc.id)!.state) ? tasks.get(doc.id)!.state : null,
+      taskState: tasks.has(doc.id) && !['done', 'skipped'].includes(tasks.get(doc.id)!.state) ? displayJobState(tasks.get(doc.id)!) : null,
       hasCurrentVectors: doc.modelFingerprint === this.modelFingerprint() && doc.hasVectors }));
   }
   async read(input: any) {

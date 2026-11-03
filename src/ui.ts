@@ -26,7 +26,7 @@ function rememberSettings() {
 function clearSettingDrafts(...ids: string[]) { for (const id of ids) delete settingDrafts[id]; }
 const labels: Record<string, string> = { missing: '未配置', configured: '已配置 · 未验证', valid: '已验证有效',
   expired: 'Key 已过期', invalid: 'Key 无效', auth_failed: '鉴权失败', ready: '已入库', stale: '内容待更新',
-  queued: '排队中', waiting_file: '等待 PDF', submitting: '提交解析', uploading: '上传中', pending: '云端排队', running: '解析中',
+  queued: '排队中', waiting_file: '等待 PDF', submitting: '提交解析', uploading: '上传中', confirming_upload: '等待上传确认', pending: '云端排队', running: '解析中',
   converting: '转换中', download: '下载结果', embedding: '向量化', done: '完成', skipped: '已跳过',
   blocked_credentials: '等待有效 Key', blocked_cloud: '等待启用上传', blocked_model: '等待模型', failed: '失败', retry: '稍后重试', metadata: '书目已存' };
 const text = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
@@ -167,10 +167,13 @@ async function showDetail() {
   });
 }
 function renderJobs() {
-  setMarkup(byId('view'), `<div class="section-toolbar"><h2>解析与入库任务 <span>${status.queue.length}</span></h2>${button('resume-jobs', 'play', '恢复可重试任务')}</div><div class="table-wrap"><table><thead><tr><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${status.queue.map((job: any) => `<tr><td>${text(documents.find(d => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || '')}</td><td>${job.can_resume ? `<button data-retry="${text(job.id)}">重试此任务</button>` : job.requires_rebuild ? `<button data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">提交结果不确定、上传未完成或云端任务失效时，请先检查 MinerU 任务，再单独重建。批量恢复不会重新提交这些任务。</div>`);
+  setMarkup(byId('view'), `<div class="section-toolbar"><h2>解析与入库任务 <span>${status.queue.length}</span></h2>${button('resume-jobs', 'play', '恢复可重试任务')}</div><div class="table-wrap"><table><thead><tr><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${status.queue.map((job: any) => `<tr><td>${text(documents.find(d => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.displayState || job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || job.progress?.message || '')}</td><td>${job.can_resume ? `<button data-retry="${text(job.id)}">${['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code) ? '恢复查询原任务' : '重试此任务'}</button>` : ''}${job.requires_rebuild ? `<button data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">等待上传确认时会持续查询原任务，不重复上传。确认超时可先恢复查询；仅在检查原任务后仍需重传时选择“检查后重建”。提交结果不确定或任务失效时仍需检查后重建。</div>`);
   byId('resume-jobs').onclick = () => action(async () => { const result = await bridge.resume(); await refresh(); return `${result.resumed} 个可恢复任务已重新排队`; });
   document.querySelectorAll('[data-retry]').forEach(el => el.addEventListener('click', () => action(async () => {
-    await bridge.resume(el.getAttribute('data-retry')); await refresh(); return '此任务已重新排队';
+    const job = status.queue.find((j: any) => j.id === el.getAttribute('data-retry'));
+    const resumingUpload = ['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job?.error?.code);
+    await bridge.resume(el.getAttribute('data-retry')); await refresh();
+    return resumingUpload ? '已恢复查询原任务，不会重新上传 PDF' : '此任务已重新排队';
   })));
   document.querySelectorAll('[data-rebuild]').forEach(el => el.addEventListener('click', () => action(async () => {
     if (!confirm('已检查 MinerU 原任务并确定需要重建？此操作可能重新上传 PDF 并消耗解析额度。')) return;
