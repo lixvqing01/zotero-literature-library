@@ -7,6 +7,21 @@ try {
   page.on('pageerror', e => errors.push(e.message));
   await page.goto('http://127.0.0.1:4179');
   await page.getByRole('button', { name: 'Attention Is All You Need', exact: true }).waitFor();
+  // Gecko puts native XUL popup labels in the same chrome document as this HTML UI.
+  // Exercise the actual stylesheet with both namespaces, even in the headless preview.
+  const namespaceStyles = await page.evaluate(() => {
+    const html = document.createElement('label');
+    const native = document.createElementNS('http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul', 'label');
+    native.classList.add('choice');
+    html.textContent = native.textContent = 'Menu label fixture';
+    document.body.append(html, native);
+    const result = { html: getComputedStyle(html).display, native: getComputedStyle(native).display,
+      nativeMargin: getComputedStyle(native).marginTop };
+    html.remove(); native.remove(); return result;
+  });
+  assert.equal(namespaceStyles.html, 'flex');
+  assert.notEqual(namespaceStyles.native, 'flex', 'Plugin CSS must not restyle native popup labels');
+  assert.notEqual(namespaceStyles.nativeMargin, '13px');
   await page.screenshot({ path: 'test-output/ui-desktop.png', fullPage: true });
   await page.getByRole('button', { name: 'Attention Is All You Need', exact: true }).click();
   await page.locator('#detail-dialog[open]').waitFor();

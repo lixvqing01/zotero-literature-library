@@ -2,13 +2,13 @@
 
 单个 Zotero 插件：MinerU PDF → Markdown、插件内 Qwen 本地向量化或兼容 OpenAI 的 Embeddings API、分层文献查询、知识库管理界面和 MCP。普通用户无需安装 Ollama、Python、Node.js、Docker 或数据库服务。
 
-当前为 **0.3.0 测试版**。已在隔离的 Zotero 10.0.7 / Windows 配置中运行验证；清单声明 Zotero 8–10，但 8/9 尚未实机验证。测试未修改正式 Zotero 配置或文献库。
+当前为 **0.3.1 测试版**。已在隔离的 Zotero 10.0.7 / Windows 配置中运行验证；清单声明 Zotero 8–10，但 8/9 尚未实机验证。测试未修改正式 Zotero 配置或文献库。
 
-[下载 v0.3.0 测试版](https://github.com/lixvqing01/zotero-literature-library/releases/tag/v0.3.0) · [验证记录](docs/验证记录.md) · [Agent 使用说明](docs/Agent使用说明.md)
+[下载 v0.3.1 测试版](https://github.com/lixvqing01/zotero-literature-library/releases/tag/v0.3.1) · [验证记录](docs/验证记录.md) · [Agent 使用说明](docs/Agent使用说明.md)
 
 ## 安装与首次配置
 
-1. 从 [GitHub Releases](https://github.com/lixvqing01/zotero-literature-library/releases) 下载 `.xpi`。在 Zotero 的“工具 → 插件”中，选择齿轮菜单“从文件安装插件”，打开下载的安装包，按 Zotero 提示重启。开发构建产物位于 `dist/literature-library-0.3.0.xpi`。
+1. 从 [GitHub Releases](https://github.com/lixvqing01/zotero-literature-library/releases) 下载 `.xpi`。在 Zotero 的“工具 → 插件”中，选择齿轮菜单“从文件安装插件”，打开下载的安装包，按 Zotero 提示重启。开发构建产物位于 `dist/literature-library-0.3.1.xpi`。
 2. 在“工具 → 插件”的 Literature Library 卡片点击“打开知识库 / MinerU 设置”。也可以从“设置 → Literature Library”或“工具 → Literature Library”进入，条目右键菜单有“查看知识库”。
 3. 在插件设置页或管理器“设置”中输入 MinerU Key。可填写 Key **生成日期**或实际到期日期；不填时显示有效期未知。保存日期不会被当作生成日期。Key 存入 Zotero/Gecko 登录凭据存储，界面不回显；安装包不包含用户 Key。
 4. 设置页按“PDF 解析 → 向量模型 → Agent 接入”分步配置。MinerU 云解析固定开启，配置有效 Key 后才能解析 PDF；Key 旁悬停提示和链接说明获取方式。解析结果保存在本机。

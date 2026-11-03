@@ -1,3 +1,5 @@
+/* HTML controls must not override Gecko native XUL popup labels and menu items. */
+@namespace url("http://www.w3.org/1999/xhtml");
 :root { color-scheme: light; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; color: #202622; background: #fafbf9; --green:#187b68; --line:#e3e7e1; --muted:#70796f; }
 * { box-sizing: border-box; letter-spacing: 0; }
 [hidden] { display:none !important; }
