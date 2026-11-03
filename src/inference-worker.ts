@@ -1,6 +1,6 @@
 // The browser build is bundled with the XPI; no Node runtime or model service is used.
 import { env, pipeline } from '@huggingface/transformers';
-import { MODELS } from './models';
+import { MODELS, MODEL_SOURCES } from './models';
 env.allowRemoteModels = true;
 env.allowLocalModels = false;
 // Gecko's CacheStorage is unsafe in a system-principal Worker. Persist through
@@ -31,17 +31,22 @@ self.onmessage = ({ data }) => {
     cacheRequests.get(data.cacheID)?.(data.cacheResult); cacheRequests.delete(data.cacheID); return;
   }
   chain = chain.then(async () => {
-    const { id, model, texts, query } = data;
+    const { id, model, texts, query, modelSource = 'modelscope' } = data;
     try {
       const spec = MODELS[model as keyof typeof MODELS];
       if (!spec) throw new Error('未知向量模型。');
-      if (active !== model) {
+      if (!MODEL_SOURCES[modelSource as keyof typeof MODEL_SOURCES]) throw new Error('未知模型下载源。');
+      if (active !== `${model}:${modelSource}`) {
         if (extractor) await extractor.dispose();
         extractor = undefined; active = '';
-        extractor = await pipeline('feature-extraction', spec.id, { dtype: 'q8', device: 'wasm', revision: spec.revision,
+        const sourceSpec = MODEL_SOURCES[modelSource as keyof typeof MODEL_SOURCES];
+        env.remoteHost = sourceSpec.host;
+        env.remotePathTemplate = sourceSpec.path;
+        const revision = modelSource === 'modelscope' ? sourceSpec.revision : spec.revision;
+        extractor = await pipeline('feature-extraction', spec.id, { dtype: 'q8', device: 'wasm', revision,
           progress_callback: (progress: any) => self.postMessage({ id, progress: { status: progress.status,
             file: progress.file, progress: progress.progress } }) });
-        active = model;
+        active = `${model}:${modelSource}`;
       }
       const vectors = [];
       for (const text of texts) {

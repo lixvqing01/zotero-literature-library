@@ -4,7 +4,8 @@
     <html:button onclick="Zotero.LiteratureLibrary.openManager()">打开知识库管理器 / MinerU 设置</html:button>
   </groupbox>
   <groupbox>
-    <html:h3>MinerU API Key</html:h3>
+    <html:h3>MinerU API Key <html:span tabindex="0" title="登录 https://mineru.net/apiManage/token 创建 API Token。Key 有效期通常为 90 天；填写生成日期可显示预计到期时间。API 返回过期时，任务会暂停并提示更新。">ⓘ</html:span></html:h3>
+    <html:p>PDF 全文解析固定使用 MinerU 云端。向量模型和 Agent 一键接入请打开上方知识库管理器的设置页。</html:p>
     <html:input id="ll-pref-key" type="password" placeholder="新的 MinerU Key" autocomplete="off" style="width:360px"/>
     <html:label>生成日期（可选） <html:input id="ll-pref-issued" type="date"/></html:label>
     <html:label>到期日期（可选） <html:input id="ll-pref-expiry" type="date"/></html:label>

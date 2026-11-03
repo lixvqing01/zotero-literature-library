@@ -3,9 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 const fixture = {
   status: {
-    settings: { autoIndex: true, cloudEnabled: true, model: 'qwen', embeddingsEnabled: true, mcpEnabled: true, ocr: true },
+    settings: { autoIndex: true, cloudEnabled: true, model: 'qwen', embeddingProvider: 'local', modelSource: 'modelscope',
+      embeddingApiBaseUrl: 'https://api.openai.com/v1', embeddingApiModel: 'text-embedding-3-small',
+      embeddingsEnabled: true, mcpEnabled: true, ocr: true },
     credentials: { state: 'configured', revision: 1, issuedAt: null, expiresAt: null, checkedAt: null, daysRemaining: null },
-    model: { state: 'ready', model: 'qwen', progress: null },
+    model: { state: 'idle', model: 'qwen', provider: 'local', progress: null, checkedAt: null, dimension: null },
+    embedding_credentials: { state: 'missing' },
+    agents: { codex: { configured: false, path: 'C:/Users/You/.codex/config.toml' }, claudeCode: { configured: false, path: 'C:/Users/You/.claude.json' } },
     coverage: { documents: 4, abstracts: 4, fulltext: 3, vectors: 2 },
     endpoint: 'http://127.0.0.1:23119/literature-library/mcp',
     queue: [{ id: 'j2', documentID: 'd3', state: 'blocked_model', can_resume: true, error: { message: '模型下载中断，请重试。' } }, { id: 'j3', documentID: 'd2', state: 'failed', requires_rebuild: true, error: { message: '提交结果未知，请检查 MinerU。' } }, { id: 'j1', documentID: 'd4', state: 'running', attempts: 0, progress: { extracted_pages: 8, total_pages: 14 } }]

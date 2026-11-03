@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.3.0 · 2026-11-03 · 测试版
+
+- 设置重排为 PDF 解析、向量模型、Agent 接入三个步骤；刷新和切换页面保留未提交草稿，模型测试结果显示维度和时间。
+- MinerU 云解析固定开启，Key 旁增加悬停帮助与获取链接，保留过期错误和任务恢复机制。
+- 本地模型默认从 ModelScope 下载，可选 hf-mirror.com / Hugging Face；修复 ModelScope 缓存地址识别。
+- 增加兼容 OpenAI 的 Embeddings API，Key 保存在 Zotero 凭据存储，连接测试验证维度与归一化结果。
+- Codex / Claude Code 支持一键合并用户级 MCP 配置，原配置备份、重复安装及失败恢复；DeepSeek Harness 等客户端可复制通用 MCP JSON。
+- 22 项核心测试、隔离 Zotero 集成、MCP HTTP 与桌面/窄屏界面回归；真实 MinerU 云解析及 Word/WPS Refresh 仍未验收。
+
 ## 0.2.0 · 2026-11-02 · 测试版
 
 - 修复纯向量查询混入关键词结果；混合检索改为排名融合，同一条目的多附件按文献去重。

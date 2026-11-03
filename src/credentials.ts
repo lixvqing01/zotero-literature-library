@@ -59,3 +59,28 @@ export class Credentials {
   }
   private async persist() { await this.store.set('credentials', this.info); }
 }
+
+const EMBEDDING_HOST = 'chrome://literature-library';
+const EMBEDDING_REALM = 'Embedding API';
+export class EmbeddingCredentials {
+  constructor(private changed: () => void | Promise<void>) {}
+  private logins() { return Services.logins.findLogins(EMBEDDING_HOST, null, EMBEDDING_REALM); }
+  status() { return { state: this.logins().length ? 'configured' : 'missing' }; }
+  async read() {
+    const login = this.logins()[0];
+    if (!login) throw new AppError({ code: 'EMBEDDING_API_KEY_MISSING', message: '尚未配置向量 API Key。', retryable: false, requires_user_action: true });
+    return login.password as string;
+  }
+  async save(input: { key?: string; clear?: boolean }) {
+    if (input.clear) { for (const login of this.logins()) Services.logins.removeLogin(login); }
+    else if (input.key?.trim()) {
+      const key = input.key.trim().replace(/^Bearer\s+/i, '');
+      if (/\s/.test(key) || key.length < 8 || key.length > 4096) throw new Error('API Key 格式不正确。');
+      const login = Cc['@mozilla.org/login-manager/loginInfo;1'].createInstance(Ci.nsILoginInfo);
+      login.init(EMBEDDING_HOST, null, EMBEDDING_REALM, 'embedding-api', key, '', '');
+      const old = this.logins()[0];
+      if (old) Services.logins.modifyLogin(old, login); else await Services.logins.addLoginAsync(login);
+    }
+    await this.changed(); return this.status();
+  }
+}

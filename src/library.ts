@@ -1,23 +1,30 @@
 import { AppError, boundedInt, publicError,
   type DocumentRecord, type Layer } from './core';
-import { Credentials } from './credentials';
+import { Credentials, EmbeddingCredentials } from './credentials';
+import { EmbeddingAPI, embeddingURL } from './embedding-api';
 import { MinerUClient, safeRemoteURL } from './mineru';
 import { importArchive } from './pdf-results';
 import { Inference } from './inference';
 import { Store, type Job } from './store';
-import { modelFingerprint } from './models';
+import { modelFingerprint, type ModelSource } from './models';
 import { CitationBridge } from './citation-bridge';
 import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
 import { ACTIVE, canResume, resumedJob, requiresRebuild, type ResumeReason } from './queue';
+import { AgentInstaller } from './agent-installer';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
+  embeddingProvider: 'local' | 'api'; modelSource: ModelSource; embeddingApiBaseUrl: string; embeddingApiModel: string;
   embeddingsEnabled: boolean; mcpEnabled: boolean; ocr: boolean; }
-const DEFAULTS: Settings = { autoIndex: false, cloudEnabled: false, model: 'qwen',
+const DEFAULTS: Settings = { autoIndex: false, cloudEnabled: true, model: 'qwen', embeddingProvider: 'local',
+  modelSource: 'modelscope', embeddingApiBaseUrl: 'https://api.openai.com/v1', embeddingApiModel: 'text-embedding-3-small',
   embeddingsEnabled: true, mcpEnabled: false, ocr: true };
 const AUTH_ERRORS = ['MINERU_KEY_MISSING', 'MINERU_TOKEN_EXPIRED', 'MINERU_TOKEN_INVALID', 'MINERU_AUTH_FAILED'];
 export class Library {
   store: Store;
   credentials: Credentials;
+  embeddingCredentials: EmbeddingCredentials;
+  embeddingAPI: EmbeddingAPI;
+  agentInstaller: AgentInstaller;
   mineru: MinerUClient;
   inference: Inference;
   citations: CitationBridge;
@@ -29,6 +36,7 @@ export class Library {
   private listeners = new Set<() => void>();
   private enqueueChain: Promise<any> = Promise.resolve();
   private transfers = new Set<any>();
+  private lastEmbeddingCheck: any;
   private async remoteFetch(url: string, options: any = {}) {
     const controller = new this.win.AbortController(); this.transfers.add(controller);
     const timer = this.win.setTimeout(() => controller.abort(), 120000);
@@ -39,6 +47,9 @@ export class Library {
   constructor(public root: string, private win: any) {
     this.store = new Store(root);
     this.credentials = new Credentials(this.store, () => this.changed());
+    this.embeddingCredentials = new EmbeddingCredentials(async () => {
+      this.lastEmbeddingCheck = null; await this.store.set('embeddingModelCheck', null); this.changed();
+    });
     this.mineru = new MinerUClient(async (method, url, body, headers) => {
       const xhr = await Zotero.HTTP.request(method, url, { headers,
         body: body === undefined ? undefined : JSON.stringify(body), responseType: 'text',
@@ -47,11 +58,39 @@ export class Library {
       return { status: xhr.status, body: parsed };
     }, () => this.credentials.read(), (revision, error) => this.credentials.report(revision, error));
     this.inference = new Inference(win, win, () => this.changed(), PathUtils.join(root, 'models'));
+    this.embeddingAPI = new EmbeddingAPI(async (url, key, body) => {
+      try {
+        const xhr = await Zotero.HTTP.request('POST', url, { headers: { Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json' }, body: JSON.stringify(body), responseType: 'text', successCodes: false,
+          timeout: 120000, debug: false, logBodyLength: 0 });
+        if (!xhr.status) throw new AppError({ code: 'EMBEDDING_API_NETWORK_ERROR', message: '连接向量 API 失败，请检查网络、端点和服务状态。', retryable: true });
+        if (xhr.status < 200 || xhr.status >= 300) throw new AppError({ code: `EMBEDDING_API_HTTP_${xhr.status}`,
+          message: xhr.status === 401 || xhr.status === 403 ? '向量 API 鉴权失败，请检查 API Key 与权限。'
+            : xhr.status === 429 ? '向量 API 请求受限，请检查额度后重试。'
+              : `向量 API 返回 HTTP ${xhr.status}，请检查端点与模型配置。`, retryable: xhr.status === 429 || xhr.status >= 500,
+          requires_user_action: xhr.status === 401 || xhr.status === 403 });
+        try { return JSON.parse(xhr.responseText); }
+        catch { throw new AppError({ code: 'EMBEDDING_API_BAD_RESPONSE', message: '向量 API 没有返回 JSON。', retryable: false }); }
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw new AppError({ code: 'EMBEDDING_API_NETWORK_ERROR', message: '连接向量 API 失败，请检查网络、端点和服务状态。', retryable: true });
+      }
+    }, () => this.embeddingCredentials.read());
+    const home = Services.dirsvc.get('Home', Ci.nsIFile).path;
+    this.agentInstaller = new AgentInstaller(home, async () => {
+      const status = await this.status();
+      return { url: status.endpoint, token: await this.store.get('mcpToken', '') };
+    });
     this.citations = new CitationBridge(this);
   }
   async init() {
     await this.store.init();
-    this.settings = { ...DEFAULTS, ...await this.store.get('settings', DEFAULTS) };
+    const storedSettings = await this.store.get('settings', DEFAULTS);
+    this.settings = { ...DEFAULTS, ...storedSettings, cloudEnabled: true,
+      modelSource: ['modelscope', 'hf-mirror', 'huggingface'].includes(storedSettings.modelSource) ? storedSettings.modelSource : 'modelscope',
+      embeddingProvider: storedSettings.embeddingProvider === 'api' ? 'api' : 'local' };
+    await this.store.set('settings', this.settings);
+    this.lastEmbeddingCheck = await this.store.get('embeddingModelCheck', null);
     await this.credentials.init();
     this.citations.install();
     if (!await this.store.get('mcpToken', '')) await this.store.set('mcpToken',
@@ -68,6 +107,7 @@ export class Library {
         await this.store.putJob(job);
       }
     }
+    await this.resume('cloud');
     this.schedule(2000);
     this.scanTimer = this.win.setInterval(() => this.reconcile().catch(() => {}), 5 * 60000);
   }
@@ -75,21 +115,48 @@ export class Library {
   changed() { for (const listener of this.listeners) { try { listener(); } catch {} } }
   async saveSettings(input: Partial<Settings>) {
     const wasAuto = this.settings.autoIndex, wasCloud = this.settings.cloudEnabled;
-    const previousModel = this.settings.model, wereEmbeddings = this.settings.embeddingsEnabled;
+    const previousFingerprint = this.modelFingerprint(), wereEmbeddings = this.settings.embeddingsEnabled;
     const safe: Partial<Settings> = {};
-    for (const k of ['autoIndex', 'cloudEnabled', 'embeddingsEnabled', 'mcpEnabled', 'ocr'] as const)
+    for (const k of ['autoIndex', 'embeddingsEnabled', 'mcpEnabled', 'ocr'] as const)
       if (typeof input[k] === 'boolean') safe[k] = input[k];
     if (input.model === 'qwen' || input.model === 'e5') safe.model = input.model;
+    if (input.embeddingProvider === 'local' || input.embeddingProvider === 'api') safe.embeddingProvider = input.embeddingProvider;
+    if (input.modelSource && ['modelscope', 'hf-mirror', 'huggingface'].includes(input.modelSource)) safe.modelSource = input.modelSource;
+    if (typeof input.embeddingApiBaseUrl === 'string' && input.embeddingApiBaseUrl.length <= 1200) {
+      embeddingURL(input.embeddingApiBaseUrl); safe.embeddingApiBaseUrl = input.embeddingApiBaseUrl.trim();
+    }
+    if (typeof input.embeddingApiModel === 'string' && input.embeddingApiModel.length <= 300) safe.embeddingApiModel = input.embeddingApiModel.trim();
     this.settings = { ...this.settings, ...safe };
+    this.settings.cloudEnabled = true;
     await this.store.set('settings', this.settings); this.changed(); this.schedule();
     if (!wasAuto && this.settings.autoIndex) {
       await this.store.set('autoScanSince', new Date().toISOString().slice(0, 19).replace('T', ' '));
     }
-    if (!wasCloud && this.settings.cloudEnabled) await this.resume('cloud');
-    if (previousModel !== this.settings.model || wereEmbeddings && !this.settings.embeddingsEnabled) await this.resume('model');
+    if (!wasCloud) await this.resume('cloud');
+    if (previousFingerprint !== this.modelFingerprint() || wereEmbeddings && !this.settings.embeddingsEnabled) await this.resume('model');
     return this.settings;
   }
-  modelFingerprint() { return modelFingerprint(this.settings.model) + ':layers-v2'; }
+  modelFingerprint() {
+    if (this.settings.embeddingProvider === 'api') {
+      let endpoint = this.settings.embeddingApiBaseUrl.trim().replace(/\/+$/, '').replace(/\/embeddings$/i, '');
+      return `openai-embeddings:${endpoint}:${this.settings.embeddingApiModel.trim()}:normalized-v1:layers-v3`;
+    }
+    return modelFingerprint(this.settings.model, this.settings.modelSource) + ':layers-v3';
+  }
+  async embedTexts(texts: string[], query = false) {
+    if (this.settings.embeddingProvider === 'api')
+      return this.embeddingAPI.embed(this.settings.embeddingApiBaseUrl, this.settings.embeddingApiModel, texts);
+    return this.inference.embed(this.settings.model, texts, query, this.settings.modelSource);
+  }
+  async testEmbeddingModel() {
+    this.lastEmbeddingCheck = null; await this.store.set('embeddingModelCheck', null);
+    const fingerprint = this.modelFingerprint(), provider = this.settings.embeddingProvider;
+    const model = provider === 'local' ? this.settings.model : this.settings.embeddingApiModel;
+    const vectors = await this.embedTexts(['测试本地或 API 向量模型是否正常工作。']);
+    if (fingerprint !== this.modelFingerprint()) throw new Error('模型配置已变化，请测试当前模型。');
+    const result = { state: 'ready', provider, model, dimension: vectors[0].length, checkedAt: new Date().toISOString(), fingerprint };
+    await this.store.set('embeddingModelCheck', result); this.lastEmbeddingCheck = result; this.changed(); return result;
+  }
   parserFingerprint() { return `mineru-v4:vlm:table:formula:ocr=${this.settings.ocr}:schema1`; }
   async snapshot(item: any, attachment?: any): Promise<DocumentRecord> {
     const group = Zotero.Libraries.get(item.libraryID)?.libraryType === 'group'
@@ -308,10 +375,10 @@ export class Library {
         doc.chunks = [{ id: 'metadata', sectionId: 'metadata', text: metadataText(doc), page: null, layer: 'metadata' },
           ...abstractChunks, ...doc.chunks.filter(c => c.layer === 'fulltext')];
         if (this.settings.embeddingsEnabled) {
-          const model = this.settings.model, fingerprint = this.modelFingerprint();
+          const fingerprint = this.modelFingerprint();
           for (let i = 0; i < doc.chunks.length; i += 2) {
             if (this.stopped) return;
-            const vectors = await this.inference.embed(model, doc.chunks.slice(i, i + 2).map(c => `${doc!.title}\n${c.text}`));
+            const vectors = await this.embedTexts(doc.chunks.slice(i, i + 2).map(c => `${doc!.title}\n${c.text}`));
             vectors.forEach((v, j) => { doc!.chunks[i + j].vector = v; });
             job.progress = { embedded: Math.min(i + 2, doc.chunks.length), total: doc.chunks.length };
             await this.store.putJob(job); this.changed();
@@ -347,11 +414,18 @@ export class Library {
   }
   async status() {
     const docs = await this.store.summaries(), jobs = await this.store.jobs();
-    return { settings: this.settings, credentials: this.credentials.status(), model: this.inference.state, citation_handoff: this.citations.status(),
+    const embeddingModel = this.settings.embeddingProvider === 'api' ? { state: this.embeddingCredentials.status().state,
+      provider: 'api', model: this.settings.embeddingApiModel, dimension: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.dimension : null,
+      checkedAt: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.checkedAt : null } : { ...this.inference.state,
+      provider: 'local', source: this.settings.modelSource, checkedAt: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.checkedAt : null,
+      dimension: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.dimension : null };
+    return { settings: this.settings, credentials: this.credentials.status(), embedding_credentials: this.embeddingCredentials.status(),
+      model: embeddingModel, inference: this.inference.state, citation_handoff: this.citations.status(),
       coverage: { documents: docs.length, abstracts: docs.filter(d => d.abstract).length,
         fulltext: docs.filter(d => d.hasFulltext).length, vectors: docs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
       queue: jobs.map(job => ({ ...job, can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
-      local_only: !this.settings.cloudEnabled, parsing_provider: 'mineru', endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
+      agents: await this.agentInstaller.status(), local_only: false, parsing_provider: 'mineru',
+      endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
   }
   async list() {
     const [docs, jobs] = await Promise.all([this.store.summaries(), this.store.jobs()]);
@@ -403,7 +477,7 @@ export class Library {
       try {
         if (docs.length && !indexed.length) throw new AppError({ code: 'INDEX_VECTORS_MISSING',
           message: '当前检索层没有与所选模型匹配的向量，请启用向量化并重新入库。', retryable: false, requires_user_action: true });
-        if (docs.length) vector = (await this.inference.embed(this.settings.model, [query], true))[0];
+        if (docs.length) vector = (await this.embedTexts([query], true))[0];
       }
       catch (error) { semanticError = publicError(error); if (input.mode === 'semantic') throw error; }
     }

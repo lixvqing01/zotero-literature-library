@@ -9,6 +9,10 @@ import { canResume, resumedJob } from '../src/queue';
 import { Library } from '../src/library';
 import { Inference } from '../src/inference';
 import { summarize } from '../src/store';
+import { EmbeddingAPI, embeddingURL } from '../src/embedding-api';
+import { AgentInstaller, installClaudeConfig, installCodexBlock } from '../src/agent-installer';
+import { posix } from 'node:path';
+import { isModelCacheURL } from '../src/models';
 import type { DocumentRecord } from '../src/core';
 
 function paper(id: string, title: string, vector?: number[], text = 'Evidence on a different topic.'): DocumentRecord {
@@ -18,6 +22,13 @@ function paper(id: string, title: string, vector?: number[], text = 'Evidence on
     sections: [{ id: 's1', heading: 'Methods', level: 1, kind: 'content', page: 2, text }],
     chunks: [{ id: 'c1', sectionId: 's1', text, page: 2, layer: 'fulltext', vector }] };
 }
+
+test('ModelScope model URLs persist in the approved local cache without accepting unrelated hosts', () => {
+  assert(isModelCacheURL('https://www.modelscope.cn/models/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/master/onnx/model_quantized.onnx'));
+  assert(isModelCacheURL('https://hf-mirror.com/Xenova/multilingual-e5-small/resolve/master/tokenizer.json'));
+  assert(!isModelCacheURL('https://www.modelscope.cn/Xenova/multilingual-e5-small/resolve/master/config.json'));
+  assert(!isModelCacheURL('https://example.com/models/Xenova/multilingual-e5-small/resolve/master/config.json'));
+});
 
 test('pure semantic search excludes lexical-only metadata and incompatible vectors', () => {
   const docs = [paper('lexical', 'needle needle', undefined), paper('semantic', 'Other topic', [1, 0]),
@@ -113,6 +124,66 @@ test('failed inference host initialization can be retried without restarting Zot
     await assert.rejects(inference.embed('qwen', ['test']), /未就绪/);
     assert.deepEqual(await inference.embed('qwen', ['test']), [[1, 0]]);
   } finally { inference.close(); }
+});
+
+test('OpenAI-compatible embedding API validates local endpoints, sorts responses and normalizes vectors', async () => {
+  assert.equal(embeddingURL('https://api.example.com/v1/'), 'https://api.example.com/v1/embeddings');
+  assert.equal(embeddingURL('https://api.example.com/v1/embeddings'), 'https://api.example.com/v1/embeddings');
+  assert.equal(embeddingURL('http://127.0.0.1:9000/v1'), 'http://127.0.0.1:9000/v1/embeddings');
+  assert.throws(() => embeddingURL('http://api.example.com/v1'));
+  assert.throws(() => embeddingURL('https://user:pass@api.example.com/v1'));
+  let sent: any;
+  const api = new EmbeddingAPI(async (_url, key, body) => {
+    assert.equal(key, 'fixture-embedding-key'); sent = body;
+    return { data: [{ index: 1, embedding: [0, 2, 0] }, { index: 0, embedding: [3, 4, 0] }] };
+  }, async () => 'fixture-embedding-key');
+  const vectors = await api.embed('https://api.example.com/v1', 'fixture-model', ['first', 'second']);
+  assert.deepEqual(sent.input, ['first', 'second']);
+  assert.deepEqual(vectors[0], [0.6, 0.8, 0]);
+  assert.deepEqual(vectors[1], [0, 1, 0]);
+});
+
+test('OpenAI-compatible embedding rejects malformed or zero vectors without exposing credentials', async () => {
+  const api = new EmbeddingAPI(async () => ({ data: [{ index: 0, embedding: [0, 0] }] }), async () => 'fixture-secret');
+  await assert.rejects(api.embed('https://api.example.com/v1', 'fixture', ['text']), (e: any) =>
+    e.detail.code === 'EMBEDDING_API_BAD_RESPONSE' && !e.message.includes('fixture-secret'));
+  const mismatched = new EmbeddingAPI(async () => ({ data: [] }), async () => 'fixture-secret');
+  await assert.rejects(mismatched.embed('https://api.example.com/v1', 'fixture', ['text']),
+    (e: any) => e.detail.code === 'EMBEDDING_API_BAD_RESPONSE');
+});
+
+test('Agent setup updates only the Literature Library entry and remains idempotent', () => {
+  const json = installClaudeConfig(JSON.stringify({ theme: 'dark', mcpServers: { other: { type: 'http', url: 'https://example.com' } } }),
+    'http://127.0.0.1:23119/literature-library/mcp', 'fixture-token');
+  const parsed = JSON.parse(json);
+  assert.equal(parsed.theme, 'dark'); assert.equal(parsed.mcpServers.other.url, 'https://example.com');
+  assert.equal(parsed.mcpServers.zotero_literature_library.headers.Authorization, 'Bearer fixture-token');
+  assert.throws(() => installClaudeConfig('{bad json', 'http://127.0.0.1/x', 'fixture-token'), /未修改/);
+  const toml = '# preserved\n[mcp_servers.other]\nurl = "http://127.0.0.1:9999"\n';
+  const once = installCodexBlock(toml, 'http://127.0.0.1:23119/literature-library/mcp', 'fixture-token');
+  const twice = installCodexBlock(once, 'http://127.0.0.1:23119/literature-library/mcp', 'fixture-token');
+  assert.equal(twice.match(/\[mcp_servers\.zotero_literature_library\]/g)?.length, 1);
+  assert(twice.includes('[mcp_servers.other]')); assert(twice.includes('Authorization = "Bearer fixture-token"'));
+  const nested = installCodexBlock(`${toml}[mcp_servers.zotero_literature_library.env]\nOLD = "remove"\n[mcp_servers.after]\nvalue = true\n`,
+    'http://127.0.0.1:23119/literature-library/mcp', 'fixture-token');
+  assert(!nested.includes('OLD = "remove"')); assert(nested.includes('[mcp_servers.after]'));
+});
+
+test('Agent config replacement restores the original on write failure and backs it up', async () => {
+  const root: any = globalThis, originalIO = root.IOUtils, originalPaths = root.PathUtils;
+  const original = JSON.stringify({ theme: 'dark' }), path = '/fixture/.claude.json';
+  const files = new Map<string, string>([[path, original]]);
+  root.PathUtils = { join: posix.join, parent: posix.dirname };
+  root.IOUtils = { exists: async (p: string) => files.has(p), readUTF8: async (p: string) => files.get(p),
+    writeUTF8: async (p: string, value: string) => { files.set(p, value); }, makeDirectory: async () => {},
+    remove: async (p: string) => { files.delete(p); }, move: async () => { throw Error('fixture write failure'); } };
+  try {
+    const installer = new AgentInstaller('/fixture', async () => ({ url: 'http://127.0.0.1:23119/mcp', token: 'fixture-token' }));
+    await assert.rejects(installer.install('claude-code'), /无法更新/);
+    assert.equal(files.get(path), original);
+    assert.equal(files.get(path + '.literature-library.bak'), original);
+    assert.equal(files.has(path + '.literature-library.tmp'), false);
+  } finally { root.IOUtils = originalIO; root.PathUtils = originalPaths; }
 });
 
 test('HTTP 200 with A0211 remains a non-retryable expired-credential failure', () => {

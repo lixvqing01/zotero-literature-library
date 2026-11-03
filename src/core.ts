@@ -35,6 +35,7 @@ export class AppError extends Error {
 export function redact(value: unknown): string {
   return String(value ?? '').replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted]')
+    .replace(/(?:api[_-]?key|token|authorization)(?:\s*[:=]\s*|%3[dD])[^\s&,"']+/gi, '[secret redacted]')
     .replace(/https?:\/\/[^\s"<>]+\?[^\s"<>]+/g, '[signed URL redacted]').slice(0, 600);
 }
 export function publicError(error: unknown): PublicError {

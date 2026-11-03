@@ -8,6 +8,28 @@
   };
   const lib = Zotero.LiteratureLibrary.library;
   await check('plugin-startup-and-database', async () => ({ status: await lib.status(), root: lib.root }));
+  await check('required-mineru-setting-and-atomic-agent-config', async () => {
+    if (!lib.settings.cloudEnabled) throw new Error('MinerU cloud parsing must always be enabled');
+    await lib.saveSettings({cloudEnabled:false});
+    if (!lib.settings.cloudEnabled) throw new Error('Cloud setting must not be disableable');
+    const root=PathUtils.join(Services.dirsvc.get('ProfD',Ci.nsIFile).path,'agent-config-fixture');
+    const AgentInstaller=lib.agentInstaller.constructor;
+    const installer=new AgentInstaller(root,async()=>({url:'http://127.0.0.1:23129/literature-library/mcp',token:'fixture-only-agent-token'}));
+    await IOUtils.makeDirectory(PathUtils.join(root,'.claude'),{ignoreExisting:true});
+    const claudePath=PathUtils.join(root,'.claude.json');
+    await IOUtils.writeUTF8(claudePath,JSON.stringify({theme:'dark',mcpServers:{other:{type:'http',url:'https://example.invalid'}}}));
+    const claude=await installer.install('claude-code');
+    const config=JSON.parse(await IOUtils.readUTF8(claudePath));
+    if(config.theme!=='dark'||!config.mcpServers.other||config.mcpServers.zotero_literature_library.headers.Authorization!=='Bearer fixture-only-agent-token')
+      throw new Error('Claude config merge failed');
+    const codex=await installer.install('codex');await installer.install('codex');
+    const codexText=await IOUtils.readUTF8(PathUtils.join(root,'.codex','config.toml'));
+    if((codexText.match(/\[mcp_servers\.zotero_literature_library\]/g)||[]).length!==1||!codexText.includes('fixture-only-agent-token'))
+      throw new Error('Codex config was not installed idempotently');
+    const status=await installer.status();
+    if(!status.codex.configured||!status.claudeCode.configured)throw new Error('Agent installer status not detected');
+    return {codex:true,claudeCode:true,existingSettingsPreserved:true,repeatInstall:true,backup:claude.backup};
+  });
   await check('summary-migration-and-atomic-updates', async () => {
     const full = await lib.store.documents(), summaries = await lib.store.summaries();
     if (full.length !== summaries.length || summaries.some(d => d.chunks || d.markdown || d.sections))
@@ -34,6 +56,29 @@
     await lib.credentials.save({ clear: true });
     return { tested: true, state: lib.credentials.status() };
   });
+  await check('embedding-api-http-and-secure-key', async () => {
+    const saved = { ...lib.settings }, endpoint = '/test/literature-library/embeddings';
+    const handler = function() {};
+    handler.prototype = { supportedMethods: ['POST'], supportedDataTypes: ['application/json'], permitBookmarklet: false,
+      async init(request) {
+        const headers = request.headers, auth = headers.get ? headers.get('authorization') : headers.authorization;
+        if (auth !== 'Bearer fixture-embedding-api-key') return [401, 'application/json', '{}'];
+        return [200, 'application/json', JSON.stringify({ data: request.data.input.map((_, index) => ({ index, embedding: [3, 4] })) })];
+      } };
+    Zotero.Server.Endpoints[endpoint] = handler;
+    try {
+      await lib.embeddingCredentials.save({ key: 'fixture-embedding-api-key' });
+      await lib.saveSettings({ embeddingProvider: 'api', embeddingApiBaseUrl: 'http://127.0.0.1:23129/test/literature-library', embeddingApiModel: 'fixture-model' });
+      const result = await lib.testEmbeddingModel();
+      const vectors = await lib.embedTexts(['fixture input']);
+      if (result.dimension !== 2 || vectors[0][0] !== 0.6 || vectors[0][1] !== 0.8) throw new Error('API vector test failed');
+      if (JSON.stringify(await lib.status()).includes('fixture-embedding-api-key')) throw new Error('API key exposed in status');
+      return { http: true, credentials: true, dimensions: result.dimension, normalized: true };
+    } finally {
+      delete Zotero.Server.Endpoints[endpoint];
+      await lib.embeddingCredentials.save({ clear: true }); await lib.saveSettings(saved);
+    }
+  });
   await check('zotero-item-ingestion', async () => {
     const item = new Zotero.Item('journalArticle');
     item.setField('title', 'Fixture: Layered scientific retrieval');
@@ -46,7 +91,9 @@
     const enqueued = await lib.enqueueItem(item);
     await lib.tick();
     const docs = await lib.list();
-    const read = await lib.read({ document_id: docs[0].id, layer: 'abstract' });
+    const ingested = docs.find(d => d.itemKey === item.key);
+    if (!ingested) throw new Error('New fixture item missing');
+    const read = await lib.read({ document_id: ingested.id, layer: 'abstract' });
     if (!read.text.includes('hierarchical')) throw new Error('Missing abstract');
     const search = await lib.search({ query: 'hierarchical', layer: 'abstract' });
     if (!search.results.length) throw new Error('Search returned no results');
@@ -169,13 +216,13 @@
           console: Services.console.getMessageArray().map(m=>m.message||String(m)).filter(m=>/inference|worker|onnx|transformer/i.test(m)) });
     },5000);
     try {
-    const vectors = await lib.inference.embed(model, ['中文文献检索。 Scientific literature retrieval.']);
+    const vectors = await lib.inference.embed(model, ['中文文献检索。 Scientific literature retrieval.'], false, 'modelscope');
     if (!vectors[0]?.length || !vectors[0].every(Number.isFinite)) throw Error('Invalid vectors');
     return { dimensions: vectors[0].length, norm: Math.sqrt(vectors[0].reduce((s,v)=>s+v*v,0)) };
     } finally { Zotero.getMainWindow().clearInterval(timer); }
   });
   await check('qwen-vector-index-and-search',async()=> {
-    await lib.saveSettings({model:'qwen',embeddingsEnabled:true});
+    await lib.saveSettings({model:'qwen',modelSource:'huggingface',embeddingsEnabled:true});
     const doc=(await lib.list()).find(d=>!d.attachmentKey);
     const item=await lib.resolve(doc.libraryID,doc.itemKey);
     const [queued]=await lib.enqueueItem(item);
@@ -191,6 +238,16 @@
     const result=await lib.search({query:'hierarchical scientific literature',layer:'abstract',mode:'semantic'});
     if(!result.results.length)throw Error('Semantic query returned no results');
     return {dimensions:saved.chunks[0].vector.length,hits:result.results.length};
+  });
+  await check('modelscope-cache-persistence', async () => {
+    for (const repo of ['Xenova/multilingual-e5-small', 'onnx-community/Qwen3-Embedding-0.6B-ONNX']) {
+      const hash = await lib.hashText(`https://www.modelscope.cn/models/${repo}/resolve/master/onnx/model_quantized.onnx`);
+      if (!await IOUtils.exists(PathUtils.join(lib.root, 'models', hash))) throw Error('ModelScope weight cache missing: ' + repo);
+    }
+    lib.inference.close();
+    const vectors = await lib.inference.embed('e5', ['缓存重载测试。'], false, 'modelscope');
+    if (vectors[0]?.length !== 384) throw Error('Cached model failed to reload');
+    return { qwenPersisted: true, e5Persisted: true, e5Reloaded: true };
   });
   await check('automatic-item-notification',async()=> {
     await lib.saveSettings({autoIndex:true,embeddingsEnabled:false});

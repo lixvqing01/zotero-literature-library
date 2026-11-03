@@ -1,4 +1,5 @@
 import { AppError } from './core';
+import { isModelCacheURL, type ModelSource } from './models';
 export class Inference {
   private frame: any;
   private ready?: Promise<void>;
@@ -11,7 +12,7 @@ export class Inference {
   private async cache(data: any, bridgeToken: string) {
     let cacheResult: any = null;
     try {
-      if (!/^https:\/\/huggingface\.co\/(onnx-community\/Qwen3-Embedding-0\.6B-ONNX|Xenova\/multilingual-e5-small)\/resolve\/[a-f0-9]{40}\/[a-zA-Z0-9_./-]+$/.test(data.cache.key)) throw Error('Invalid model cache key');
+      if (!isModelCacheURL(data.cache.key)) throw Error('Invalid model cache key');
       const hash = Cc['@mozilla.org/security/hash;1'].createInstance(Ci.nsICryptoHash); hash.init(hash.SHA256);
       const bytes = new TextEncoder().encode(data.cache.key); hash.update(bytes, bytes.length);
       const name = Array.from(hash.finish(false), (c: any) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
@@ -64,7 +65,7 @@ export class Inference {
     }).catch(error => { this.close(); throw error; });
     return this.ready;
   }
-  async embed(model: string, texts: string[], query = false): Promise<number[][]> {
+  async embed(model: string, texts: string[], query = false, source: ModelSource = 'modelscope'): Promise<number[][]> {
     await this.init();
     this.state = { ...this.state, state: 'working', model }; this.changed();
     return new Promise((resolve, reject) => {
@@ -74,7 +75,7 @@ export class Inference {
         this.pending.delete(id); this.close(); this.state = { state: 'error', message: error.message }; this.changed(); reject(error);
       }, 20 * 60 * 1000);
       this.pending.set(id, { resolve, reject, timer });
-      this.frame.contentWindow.postMessage({ source: 'literature-host', bridgeToken: decodeURIComponent(this.frame.contentWindow.location.hash.slice(1)), id, model, texts, query }, '*');
+      this.frame.contentWindow.postMessage({ source: 'literature-host', bridgeToken: decodeURIComponent(this.frame.contentWindow.location.hash.slice(1)), id, model, texts, query, modelSource: source }, '*');
     });
   }
   close() {
