@@ -3,6 +3,17 @@
     "literature-library@local.zotero": {
       "updates": [
         {
+          "version": "0.3.0",
+          "update_link": "https://github.com/lixvqing01/zotero-literature-library/releases/download/v0.3.0/literature-library-0.3.0.xpi",
+          "update_hash": "sha256:c0d1340883f650e4e75f868fcdbfab4d344255e267a13e3e83e6a61f53170d85",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "8.0",
+              "strict_max_version": "10.*"
+            }
+          }
+        },
+        {
           "version": "0.2.0",
           "update_link": "https://github.com/lixvqing01/zotero-literature-library/releases/download/v0.2.0/literature-library-0.2.0.xpi",
           "update_hash": "sha256:ec0a5b065f3443f3318a427818ccadafa16be08f12de6d5626b7bb27470ca01b",
