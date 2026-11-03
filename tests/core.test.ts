@@ -5,7 +5,7 @@ import { MinerUClient, safeRemoteURL, validateUploadPDF } from '../src/mineru';
 import { rpc } from '../src/agent';
 import { CitationBridge } from '../src/citation-bridge';
 import { rankDocuments, readFulltext } from '../src/retrieval';
-import { canResume, resumedJob, requiresRebuild, displayJobState, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
+import { canResume, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
 import { Library } from '../src/library';
 import { Inference } from '../src/inference';
 import { summarize } from '../src/store';
@@ -86,6 +86,26 @@ test('credential and bulk recovery never resubmit uncertain or unrelated failure
     assert.equal(canResume({ ...base, error: { ...base.error, code } }, 'manual'), false);
     assert.equal(canResume({ ...base, error: { ...base.error, code } }, 'credentials'), false);
   }
+});
+
+test('first-time failed and in-progress entries stay in the task queue, while prior successful records remain searchable', async () => {
+  const lib: any = Object.create(Library.prototype);
+  const docs: any[] = [
+    { ...paper('successful', 'Previously indexed'), indexedAt: '2026-01-01' },
+    { ...paper('failed', 'First parse failed'), state: 'failed', error: { code: 'MINERU_PARSE_FAILED' } },
+    { ...paper('queued', 'Waiting to parse'), state: 'queued' },
+    { ...paper('metadata', 'Metadata only'), state: 'metadata' }
+  ];
+  const jobs: Job[] = [
+    { id: 'fail', documentID: 'failed', state: 'failed', attempts: 1, nextRun: 0, createdAt: '', error: { code: 'MINERU_PARSE_FAILED', message: 'failed', retryable: false } },
+    { id: 'queue', documentID: 'queued', state: 'queued', attempts: 0, nextRun: 0, createdAt: '' }
+  ];
+  lib.store = { summaries: async () => docs, jobs: async () => jobs };
+  lib.modelFingerprint = () => 'fixture-model';
+  const listed = await lib.list();
+  assert.deepEqual(listed.map((doc: any) => doc.id), ['successful', 'metadata']);
+  assert.equal(isLibraryDocument(docs[1], jobs[0]), false);
+  assert.equal(isLibraryDocument(docs[0], jobs[0]), true);
 });
 
 function uploadFixture(state = 'queued') {

@@ -73,7 +73,7 @@ export async function start({ id, rootURI }: any) {
           ...(doc.attachmentKey ? [[`${doc.libraryID}:${doc.attachmentKey}`, label]] : [])] as [string, string][];
       }));
       for (const w of Zotero.getMainWindows()) w.ZoteroPane?.itemsView?.tree?.invalidate?.();
-    }, 800);
+    }, 1500);
   });
   library.reconcile().catch(() => {});
 }

@@ -10,17 +10,17 @@ const fixture = {
     model: { state: 'idle', model: 'qwen', provider: 'local', progress: null, checkedAt: null, dimension: null },
     embedding_credentials: { state: 'missing' },
     agents: { codex: { configured: false, path: 'C:/Users/You/.codex/config.toml' }, claudeCode: { configured: false, path: 'C:/Users/You/.claude.json' } },
-    coverage: { documents: 4, abstracts: 4, fulltext: 3, vectors: 2 },
+    coverage: { documents: 3, abstracts: 3, fulltext: 3, vectors: 2 },
     endpoint: 'http://127.0.0.1:23119/literature-library/mcp',
     queue: [{ id: 'j2', documentID: 'd3', state: 'blocked_model', can_resume: true, error: { message: '模型下载中断，请重试。' } }, { id: 'j3', documentID: 'd2', state: 'failed', requires_rebuild: true, error: { message: '提交结果未知，请检查 MinerU。' } }, { id: 'j1', documentID: 'd4', state: 'running', attempts: 0, progress: { extracted_pages: 8, total_pages: 14 } },
-      { id: 'j4', documentID: 'd1', state: 'failed', batchID: 'fixture-batch', dataID: 'fixture-file', can_resume: true, requires_rebuild: true, error: { code: 'MINERU_UPLOAD_INCOMPLETE', message: '原任务尚未收到完整 PDF，请强制重建；未自动重复上传。' } }]
+      { id: 'j4', documentID: 'd4', documentTitle: '面向科学文献的分层检索与证据定位', state: 'failed', batchID: 'fixture-batch', dataID: 'fixture-file', can_resume: true, requires_rebuild: true, error: { code: 'MINERU_UPLOAD_INCOMPLETE', message: '原任务尚未收到完整 PDF，请强制重建；未自动重复上传。' } }]
   },
   documents: [
     ['d1', 'Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks', 'Patrick Lewis, Ethan Perez', '2020', 'NeurIPS', 'ready'],
     ['d2', 'Attention Is All You Need', 'Ashish Vaswani, Noam Shazeer', '2017', 'NeurIPS', 'ready'],
     ['d3', 'Qwen3 Embedding: Advancing Text Embedding and Reranking', 'Yanzhao Zhang, Mingxin Li', '2025', 'arXiv', 'ready'],
     ['d4', '面向科学文献的分层检索与证据定位', '陈明, 李华', '2026', '计算机学报', 'metadata']
-  ].map(([id, title, creators, year, publication, state], i) => ({ id, title, creators, year, publication, state,
+  ].map(([id, title, creators, year, publication, state], i) => ({ id, title, creators, year, publication, state, ...(i < 3 ? { indexedAt: '2026-01-01T00:00:00.000Z' } : {}),
     itemKey: `TEST000${i}`, libraryKey: 'library', abstract: 'We study retrieval and scientific evidence through structured document access. 本研究讨论文献检索与证据定位。',
     hasFulltext: i < 3, hasCurrentVectors: i < 2, modelFingerprint: i < 2 ? 'qwen:q8' : undefined, tags: [], collections: [],
     markdown: '# Abstract\nA structured literature retrieval study.\n\n# Methods\nMethods and supporting evidence.',

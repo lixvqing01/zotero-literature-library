@@ -9,7 +9,7 @@ import { Store, type Job } from './store';
 import { modelFingerprint, type ModelSource } from './models';
 import { CitationBridge } from './citation-bridge';
 import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
-import { ACTIVE, canResume, resumedJob, requiresRebuild, displayJobState, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
+import { ACTIVE, canResume, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
 import { AgentInstaller } from './agent-installer';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
@@ -437,6 +437,9 @@ export class Library {
   }
   async status() {
     const docs = await this.store.summaries(), jobs = await this.store.jobs();
+    const taskByDocument = new Map(jobs.map(job => [job.documentID, job]));
+    const summaryByDocument = new Map(docs.map(doc => [doc.id, doc]));
+    const libraryDocs = docs.filter(doc => isLibraryDocument(doc, taskByDocument.get(doc.id)));
     const embeddingModel = this.settings.embeddingProvider === 'api' ? { state: this.embeddingCredentials.status().state,
       provider: 'api', model: this.settings.embeddingApiModel, dimension: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.dimension : null,
       checkedAt: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.checkedAt : null } : { ...this.inference.state,
@@ -444,16 +447,17 @@ export class Library {
       dimension: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.dimension : null };
     return { settings: this.settings, credentials: this.credentials.status(), embedding_credentials: this.embeddingCredentials.status(),
       model: embeddingModel, inference: this.inference.state, citation_handoff: this.citations.status(),
-      coverage: { documents: docs.length, abstracts: docs.filter(d => d.abstract).length,
-        fulltext: docs.filter(d => d.hasFulltext).length, vectors: docs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
-      queue: jobs.map(job => ({ ...job, displayState: displayJobState(job), can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
+      coverage: { documents: libraryDocs.length, abstracts: libraryDocs.filter(d => d.abstract).length,
+        fulltext: libraryDocs.filter(d => d.hasFulltext).length, vectors: libraryDocs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
+      queue: jobs.map(job => ({ ...job, documentTitle: summaryByDocument.get(job.documentID)?.title || job.documentID,
+        displayState: displayJobState(job), can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
       agents: await this.agentInstaller.status(), local_only: false, parsing_provider: 'mineru',
       endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
   }
   async list() {
     const [docs, jobs] = await Promise.all([this.store.summaries(), this.store.jobs()]);
     const tasks = new Map(jobs.map(job => [job.documentID, job]));
-    return docs.map(doc => ({ ...doc,
+    return docs.filter(doc => isLibraryDocument(doc, tasks.get(doc.id))).map(doc => ({ ...doc,
       taskState: tasks.has(doc.id) && !['done', 'skipped'].includes(tasks.get(doc.id)!.state) ? displayJobState(tasks.get(doc.id)!) : null,
       hasCurrentVectors: doc.modelFingerprint === this.modelFingerprint() && doc.hasVectors }));
   }

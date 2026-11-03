@@ -28,4 +28,8 @@ export function displayJobState(job: Job) {
   return job.state === 'pending' && job.progress?.stage === 'upload_confirmation' ? 'confirming_upload' : job.state;
 }
 
+export function isLibraryDocument(doc: { indexedAt?: string }, job?: Job) {
+  return !!doc.indexedAt || !job || job.state === 'done' || job.state === 'skipped';
+}
+
 export const UPLOAD_CONFIRMATION_TIMEOUT = 5 * 60 * 1000;

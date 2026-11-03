@@ -2,13 +2,13 @@
 
 单个 Zotero 插件：MinerU PDF → Markdown、插件内 Qwen 本地向量化或兼容 OpenAI 的 Embeddings API、分层文献查询、知识库管理界面和 MCP。普通用户无需安装 Ollama、Python、Node.js、Docker 或数据库服务。
 
-当前为 **0.3.2 测试版**。已在隔离的 Zotero 10.0.7 / Windows 配置中运行验证；清单声明 Zotero 8–10，但 8/9 尚未实机验证。测试未修改正式 Zotero 配置或文献库。
+当前为 **0.3.3 测试版**。已在隔离的 Zotero 10.0.7 / Windows 配置中运行验证；清单声明 Zotero 8–10，但 8/9 尚未实机验证。测试未修改正式 Zotero 配置或文献库。
 
-[下载 v0.3.2 测试版](https://github.com/lixvqing01/zotero-literature-library/releases/tag/v0.3.2) · [验证记录](docs/验证记录.md) · [Agent 使用说明](docs/Agent使用说明.md)
+[下载 v0.3.3 测试版](https://github.com/lixvqing01/zotero-literature-library/releases/tag/v0.3.3) · [验证记录](docs/验证记录.md) · [Agent 使用说明](docs/Agent使用说明.md)
 
 ## 安装与首次配置
 
-1. 从 [GitHub Releases](https://github.com/lixvqing01/zotero-literature-library/releases) 下载 `.xpi`。在 Zotero 的“工具 → 插件”中，选择齿轮菜单“从文件安装插件”，打开下载的安装包，按 Zotero 提示重启。开发构建产物位于 `dist/literature-library-0.3.2.xpi`。
+1. 从 [GitHub Releases](https://github.com/lixvqing01/zotero-literature-library/releases) 下载 `.xpi`。在 Zotero 的“工具 → 插件”中，选择齿轮菜单“从文件安装插件”，打开下载的安装包，按 Zotero 提示重启。开发构建产物位于 `dist/literature-library-0.3.3.xpi`。
 2. 在“工具 → 插件”的 Literature Library 卡片点击“打开知识库 / MinerU 设置”。也可以从“设置 → Literature Library”或“工具 → Literature Library”进入，条目右键菜单有“查看知识库”。
 3. 在插件设置页或管理器“设置”中输入 MinerU Key。可填写 Key **生成日期**或实际到期日期；不填时显示有效期未知。保存日期不会被当作生成日期。Key 存入 Zotero/Gecko 登录凭据存储，界面不回显；安装包不包含用户 Key。
 4. 设置页按“PDF 解析 → 向量模型 → Agent 接入”分步配置。MinerU 云解析固定开启，配置有效 Key 后才能解析 PDF；Key 旁悬停提示和链接说明获取方式。解析结果保存在本机。
@@ -76,7 +76,7 @@ Codex 默认写入 `~/.codex/config.toml`，Claude Code 默认写入 `~/.claude.
 
 MinerU 上传/轮询/ZIP 导入和过期恢复已通过模拟服务的完整流程验证；未使用真实 Key 调用云端解析。服务端实际配额、特定 PDF 的提取质量仍需首次真实解析确认。
 
-若旧版任务提示“原任务尚未收到完整 PDF”，升级至 0.3.2 后到“解析与入库任务”点击“恢复查询原任务”，先查询已有云端任务，不会重新上传。新上传显示“等待上传确认”，确认超时也可恢复查询；只有检查原任务后仍需重传时，才选择“检查后重建”。本地文件读取不完整或文件头异常会在创建云端任务前单独报错。
+若旧版任务提示“原任务尚未收到完整 PDF”，升级至 0.3.3 后到“解析与入库任务”点击“恢复查询原任务”，先查询已有云端任务，不会重新上传。新上传显示“等待上传确认”，确认超时也可恢复查询；只有检查原任务后仍需重传时，才选择“检查后重建”。本地文件读取不完整或文件头异常会在创建云端任务前单独报错。
 
 ## 开发与验证
 
@@ -91,6 +91,6 @@ npm run build
 
 `node scripts/setup-zotero-test.mjs` 准备 `.test-profile` 与 `.test-data` 隔离测试配置。用 Zotero `-no-remote -profile <绝对路径>` 启动该配置后，测试版插件生成 `integration-report.json`；`node scripts/check-mcp.mjs` 执行真实 HTTP 测试。测试 harness 只打进隔离测试包，不进入发布 XPI。
 
-已验证：29 项核心测试、真实 Zotero 启动/凭据/GUI/入库/自动通知、MinerU 模拟过期恢复与重复跳过、Qwen/E5 真实 WASM 推理、Qwen 向量存储与语义检索、MCP 真实 HTTP、管理页桌面与窄屏检查。0.3.2 新增修复仅在后台模拟与界面回归中验证，没有操作用户桌面或调用真实云解析。
+已验证：30 项核心测试、真实 Zotero 启动/凭据/GUI/入库/自动通知、MinerU 模拟过期恢复与重复跳过、Qwen/E5 真实 WASM 推理、Qwen 向量存储与语义检索、MCP 真实 HTTP、管理页桌面与窄屏检查。0.3.3 新增修复仅在后台模拟与界面回归中验证，没有操作用户桌面或调用真实云解析。
 
 源码独立实现，第三方运行时及模型许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。源码托管于 GitHub，安装包通过 Releases 分发；插件更新清单位于仓库的 `updates.json`。GitHub Actions 对推送和 Pull Request 执行类型检查、核心测试及 XPI 构建；原生 Zotero 集成检查仍需本机执行。

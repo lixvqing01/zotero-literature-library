@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Literature Library",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "MinerU Markdown, local/API embeddings, and layered literature access for agents.",
   "author": "Literature Library Contributors",
   "homepage_url": "https://github.com/lixvqing01/zotero-literature-library",

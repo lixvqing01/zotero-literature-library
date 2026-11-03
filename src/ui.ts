@@ -16,6 +16,9 @@ const searchState: any = { query: '', layer: 'auto', mode: 'keyword', response: 
 let searchSerial = 0, detailSerial = 0, detailOffset = 0;
 let detailFilter: any = {};
 let visibleRows: any[] = [];
+let libraryPage = 0;
+let refreshRequested = false;
+const LIBRARY_PAGE_SIZE = 50;
 const settingDrafts: Record<string, string> = {};
 function rememberSettings() {
   for (const id of ['mineru-key', 'issued-at', 'expires-at', 'embedding-api-url', 'embedding-api-model', 'embedding-api-key']) {
@@ -60,11 +63,14 @@ async function action(fn: () => Promise<any>) {
   catch (error) { notify(error instanceof Error ? error.message : String(error), true); }
 }
 async function refresh() {
-  if (busy) return;
+  if (busy) { refreshRequested = true; return; }
   busy = true;
   try { [status, documents] = await Promise.all([bridge.status(), bridge.list()]); render(); }
   catch (error) { notify(error instanceof Error ? error.message : String(error), true); }
-  finally { busy = false; }
+  finally {
+    busy = false;
+    if (refreshRequested) { refreshRequested = false; queueMicrotask(() => refresh()); }
+  }
 }
 function render() {
   if (!status) return;
@@ -100,14 +106,24 @@ function renderLibrary() {
   byId('search-query').oninput = () => { searchState.query = byId('search-query').value; };
   byId('search-layer').onchange = () => { searchState.layer = byId('search-layer').value; };
   byId('search-mode').onchange = () => { searchState.mode = byId('search-mode').value; };
-  byId('clear-search').onclick = () => { searchSerial++; searchState.query = ''; searchState.response = null; renderLibrary(); };
+  byId('clear-search').onclick = () => { searchSerial++; libraryPage = 0; searchState.query = ''; searchState.response = null; renderLibrary(); };
   const response = searchState.response;
   visibleRows = response ? response.results.map((hit: any) => {
     const doc = documents.find(d => d.id === hit.document_id); return doc ? { ...doc, hit } : null;
   }).filter(Boolean) : documents;
-  fillRows(visibleRows);
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / LIBRARY_PAGE_SIZE));
+  libraryPage = Math.min(libraryPage, pageCount - 1);
+  const pageRows = visibleRows.slice(libraryPage * LIBRARY_PAGE_SIZE, (libraryPage + 1) * LIBRARY_PAGE_SIZE);
+  fillRows(pageRows);
   if (response) byId('search-notice').textContent = `${visibleRows.length} 个结果 · ${response.mode === 'semantic' ? '向量检索' : response.mode === 'hybrid' ? '混合检索' : '关键词'}${response.warning ? ' · ' + response.warning.message : ''}`;
-  byId('select-all').onchange = (event: any) => { selection = event.target.checked ? new Set(visibleRows.map(d => d.id)) : new Set(); fillRows(visibleRows); };
+  if (pageCount > 1) {
+    const pager = document.createElement('div'); pager.className = 'list-pagination';
+    pager.innerHTML = `<button id="page-previous" ${libraryPage ? '' : 'disabled="disabled"'}>上一页</button><span>${libraryPage + 1} / ${pageCount} · ${visibleRows.length} 篇</span><button id="page-next" ${libraryPage + 1 < pageCount ? '' : 'disabled="disabled"'}>下一页</button>`;
+    byId('search-notice').before(pager);
+    byId('page-previous').onclick = () => { libraryPage--; renderLibrary(); };
+    byId('page-next').onclick = () => { libraryPage++; renderLibrary(); };
+  }
+  byId('select-all').onchange = (event: any) => { pageRows.forEach(d => event.target.checked ? selection.add(d.id) : selection.delete(d.id)); fillRows(pageRows); };
   byId('empty-add')?.addEventListener('click', () => byId('add-selected').click());
   byId('reindex-selected').onclick = () => action(async () => {
     if (!selection.size) return '请先选择文献';
@@ -122,10 +138,11 @@ function renderLibrary() {
     event.preventDefault(); action(async () => {
       const serial = ++searchSerial;
       const { query, layer, mode } = searchState;
-      if (!query.trim()) { searchState.response = null; renderLibrary(); return; }
+      if (!query.trim()) { libraryPage = 0; searchState.response = null; renderLibrary(); return; }
       byId('search-notice').textContent = '正在检索…';
       const response = await bridge.search({ query, layer, mode, top_k: 50 });
       if (serial !== searchSerial) return;
+      libraryPage = 0;
       searchState.response = response;
       if (tab === 'library') renderLibrary();
     });
@@ -167,13 +184,15 @@ async function showDetail() {
   });
 }
 function renderJobs() {
-  setMarkup(byId('view'), `<div class="section-toolbar"><h2>解析与入库任务 <span>${status.queue.length}</span></h2>${button('resume-jobs', 'play', '恢复可重试任务')}</div><div class="table-wrap"><table><thead><tr><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${status.queue.map((job: any) => `<tr><td>${text(documents.find(d => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.displayState || job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || job.progress?.message || '')}</td><td>${job.can_resume ? `<button data-retry="${text(job.id)}">${['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code) ? '恢复查询原任务' : '重试此任务'}</button>` : ''}${job.requires_rebuild ? `<button data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">等待上传确认时会持续查询原任务，不重复上传。确认超时可先恢复查询；仅在检查原任务后仍需重传时选择“检查后重建”。提交结果不确定或任务失效时仍需检查后重建。</div>`);
-  byId('resume-jobs').onclick = () => action(async () => { const result = await bridge.resume(); await refresh(); return `${result.resumed} 个可恢复任务已重新排队`; });
+  const jobs = status.queue.filter((job: any) => !['done', 'skipped'].includes(job.state));
+  setMarkup(byId('view'), `<div class="section-toolbar"><h2>处理中与失败 <span>${jobs.length}</span></h2>${button('resume-jobs', 'play', '恢复可重试任务')}</div>${jobs.length ? `<div class="table-wrap"><table><thead><tr><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${jobs.map((job: any) => `<tr><td>${text(job.documentTitle || documents.find(d => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.displayState || job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || job.progress?.message || '')}</td><td>${job.can_resume ? `<button data-retry="${text(job.id)}">${['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code) ? '恢复查询原任务' : '重试此任务'}</button>` : ''}${job.requires_rebuild ? `<button data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">等待上传确认时会持续查询原任务，不重复上传。确认超时可先恢复查询；仅在检查原任务后仍需重传时选择“检查后重建”。提交结果不确定或任务失效时仍需检查后重建。</div>` : `<div class="empty queue-empty"><h2>没有处理中或失败的任务</h2><span>新加入的文献会显示在这里；失败任务也可在此重试或检查后重建。</span></div>`}`);
+  byId('resume-jobs').onclick = () => action(async () => { const result = await bridge.resume(); await refresh(); return result.resumed ? `${result.resumed} 个任务已重新排队` : '当前没有可自动重试的任务；请查看失败详情或使用“检查后重建”'; });
   document.querySelectorAll('[data-retry]').forEach(el => el.addEventListener('click', () => action(async () => {
     const job = status.queue.find((j: any) => j.id === el.getAttribute('data-retry'));
     const resumingUpload = ['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job?.error?.code);
-    await bridge.resume(el.getAttribute('data-retry')); await refresh();
-    return resumingUpload ? '已恢复查询原任务，不会重新上传 PDF' : '此任务已重新排队';
+    const result = await bridge.resume(el.getAttribute('data-retry')); await refresh();
+    if (!result.resumed) return '任务状态已变化或不可重试，已刷新队列，请查看最新详情';
+    return resumingUpload ? '已恢复查询原任务，不会重新上传 PDF' : '已重新排队；若再次失败会显示新的错误原因';
   })));
   document.querySelectorAll('[data-rebuild]').forEach(el => el.addEventListener('click', () => action(async () => {
     if (!confirm('已检查 MinerU 原任务并确定需要重建？此操作可能重新上传 PDF 并消耗解析额度。')) return;
