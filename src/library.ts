@@ -15,6 +15,7 @@ import { validateSearch } from './search-input';
 import { ResearchWorkspaces } from './research';
 import { ACTIVE, canResume, canBulkResume, canDeleteJob, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
 import { AgentInstaller } from './agent-installer';
+import { formatBytes, removeResultArchives, storageUsage } from './storage';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
   embeddingProvider: 'local' | 'api'; modelSource: ModelSource; embeddingApiBaseUrl: string; embeddingApiModel: string;
@@ -45,6 +46,7 @@ export class Library {
   private researchService?: ResearchWorkspaces;
   private queryVectors = new Map<string, Promise<number[]>>();
   private researchRevision = 0;
+  private storageCache: { checkedAt: number; value: any } | null = null;
   private get research() { return this.researchService ||= new ResearchWorkspaces(this.store); }
   private async remoteFetch(url: string, options: any = {}) {
     const controller = new this.win.AbortController(); this.transfers.add(controller);
@@ -94,6 +96,7 @@ export class Library {
   }
   async init() {
     await this.store.init();
+    await removeResultArchives(PathUtils.join(this.root, 'documents'));
     const storedSettings = await this.store.get('settings', DEFAULTS);
     this.settings = { ...DEFAULTS, ...storedSettings, cloudEnabled: true,
       modelSource: ['modelscope', 'hf-mirror', 'huggingface'].includes(storedSettings.modelSource) ? storedSettings.modelSource : 'modelscope',
@@ -434,6 +437,8 @@ export class Library {
           pdfHash: doc.pdfHash, parserFingerprint: doc.parserFingerprint });
         job.state = 'embedding';
         await this.store.commit(doc, job);
+        try { await IOUtils.remove(zip); } catch { /* Startup cleanup retries if deletion fails. */ }
+        this.storageCache = null;
       }
       if (job.state === 'embedding') {
         const abstractChunks = doc.abstract ? [{ id: 'abstract', sectionId: 'abstract', text: doc.abstract,
@@ -488,7 +493,8 @@ export class Library {
       checkedAt: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.checkedAt : null } : { ...this.inference.state,
       provider: 'local', source: this.settings.modelSource, checkedAt: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.checkedAt : null,
       dimension: this.lastEmbeddingCheck?.fingerprint === this.modelFingerprint() ? this.lastEmbeddingCheck.dimension : null };
-    return { settings: this.settings, credentials: this.credentials.status(), embedding_credentials: this.embeddingCredentials.status(),
+    const storage = await this.storageStatus();
+    return { settings: this.settings, credentials: this.credentials.status(), embedding_credentials: this.embeddingCredentials.status(), storage,
       model: embeddingModel, inference: this.inference.state, citation_handoff: this.citations.status(),
       coverage: { documents: libraryDocs.length, abstracts: libraryDocs.filter(d => d.abstract).length,
         fulltext: libraryDocs.filter(d => d.hasFulltext).length, vectors: libraryDocs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
@@ -500,6 +506,14 @@ export class Library {
       agents: await this.agentInstaller.status(), local_only: false, parsing_provider: 'mineru',
       research_revision: this.researchRevision,
       endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
+  }
+  private async storageStatus() {
+    if (this.storageCache && Date.now() - this.storageCache.checkedAt < 60000) return this.storageCache.value;
+    const bytes = await storageUsage(this.root);
+    const value = { ...bytes, formatted: { total: formatBytes(bytes.total), documents: formatBytes(bytes.documents),
+      models: formatBytes(bytes.models), database: formatBytes(bytes.database) }, checkedAt: new Date().toISOString() };
+    this.storageCache = { checkedAt: Date.now(), value };
+    return value;
   }
   async list() {
     const [docs, jobs] = await Promise.all([this.store.summaries(), this.store.jobs()]);

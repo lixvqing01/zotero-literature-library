@@ -124,7 +124,7 @@ function render() {
     ['library', '文献条目', cov.documents], ['file-text', '摘要', cov.abstracts],
     ['file-check-2', '全文已提取', cov.fulltext], ['network', '当前模型已索引', cov.vectors]
   ].map(([symbol, label, value]) => `<div class="metric">${icon(String(symbol), 19)}<div><span>${label}</span><strong>${value}</strong></div><div class="coverage"><b style="width:${cov.documents ? Number(value) / cov.documents * 100 : 0}%"></b></div></div>`).join(''));
-  const viewKey = JSON.stringify(tab === 'library' ? [tab, documents] : tab === 'jobs' ? [tab, status.queue] : tab === 'research' ? [tab, status.research_revision] : [tab, settingsPane, status.settings, status.credentials, status.model, status.embedding_credentials, status.agents]);
+  const viewKey = JSON.stringify(tab === 'library' ? [tab, documents] : tab === 'jobs' ? [tab, status.queue] : tab === 'research' ? [tab, status.research_revision] : [tab, settingsPane, status.settings, status.credentials, status.model, status.embedding_credentials, status.agents, status.storage]);
   if (viewKey !== renderedViewKey) {
     renderedViewKey = viewKey;
     if (tab === 'library') renderLibrary(); else if (tab === 'jobs') renderJobs(); else if (tab === 'research') void renderResearch(); else renderSettings();
@@ -447,7 +447,10 @@ function renderSettings() {
       <div class="status-line">${icon('calendar-clock', 15)}${badge.expiresAt ? `预计 ${text(badge.expiresAt)} 到期 · 剩余 ${badge.daysRemaining} 天` : '有效期未知'}<span>${badge.checkedAt ? '上次验证 ' + text(new Date(badge.checkedAt).toLocaleString('zh-CN')) : '等待首次 API 验证'}</span></div>
       <div class="form-actions"><button type="submit" class="primary">${icon('save')}安全保存 Key</button>${button('clear-key', 'trash-2', '清除 Key')}<a href="https://mineru.net/apiManage/token" target="_blank" rel="noreferrer">打开 MinerU Key 管理 ${icon('external-link', 14)}</a></div></form>
       <div class="setting-row"><div><strong>新条目自动加入知识库</strong><span>启用后，新加入 Zotero 的条目会自动排队解析</span></div><input id="auto-index" type="checkbox" role="switch" ${settings.autoIndex ? 'checked="checked"' : ''}/></div>
-      <div class="setting-row"><div><strong>OCR 扫描件</strong><span>交由 MinerU 识别扫描版 PDF；文字型 PDF 也可保留启用</span></div><input id="ocr" type="checkbox" role="switch" ${settings.ocr ? 'checked="checked"' : ''}/></div></section>`;
+      <div class="setting-row"><div><strong>OCR 扫描件</strong><span>交由 MinerU 识别扫描版 PDF；文字型 PDF 也可保留启用</span></div><input id="ocr" type="checkbox" role="switch" ${settings.ocr ? 'checked="checked"' : ''}/></div></section>
+      <section class="setup-card"><div class="section-title">${icon('hard-drive')}<h2>本机空间占用</h2><span class="badge">每分钟更新</span></div>
+        <div class="storage-usage"><div><span>总计</span><strong>${text(status.storage?.formatted?.total || '统计中')}</strong></div><div><span>解析缓存（含图片）</span><strong>${text(status.storage?.formatted?.documents || '统计中')}</strong></div><div><span>向量模型</span><strong>${text(status.storage?.formatted?.models || '统计中')}</strong></div><div><span>数据库与索引</span><strong>${text(status.storage?.formatted?.database || '统计中')}</strong></div></div>
+        <p class="small-note">图片保留在本机解析缓存中；MinerU 原始 result.zip 已清理，重启升级时也会清理旧版本留下的压缩包。删除解析缓存图片不会影响文献文本、检索索引或向量。</p></section>`;
   } else if (settingsPane === 'embedding') {
     const check = status.model, checkOK = check.checkedAt && check.dimension;
     content = `<section class="setup-card"><div class="section-title">${icon('cpu')}<h2>选择向量模型</h2><span class="badge ${checkOK ? 'ready' : 'warning'}">${checkOK ? `已验证 · ${check.dimension} 维` : settings.embeddingProvider === 'api' && status.embedding_credentials.state === 'missing' ? '未配置 API Key' : '尚未测试模型'}</span></div>
