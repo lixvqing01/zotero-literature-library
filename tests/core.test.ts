@@ -5,7 +5,7 @@ import { MinerUClient, safeRemoteURL, validateUploadPDF } from '../src/mineru';
 import { rpc } from '../src/agent';
 import { CitationBridge } from '../src/citation-bridge';
 import { rankDocuments, readFulltext } from '../src/retrieval';
-import { canResume, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
+import { canResume, canBulkResume, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
 import { Library } from '../src/library';
 import { Inference } from '../src/inference';
 import { summarize } from '../src/store';
@@ -106,6 +106,38 @@ test('first-time failed and in-progress entries stay in the task queue, while pr
   assert.deepEqual(listed.map((doc: any) => doc.id), ['successful', 'metadata']);
   assert.equal(isLibraryDocument(docs[1], jobs[0]), false);
   assert.equal(isLibraryDocument(docs[0], jobs[0]), true);
+});
+
+test('bulk retry excludes PDF repairs and page limits, including legacy parse-error messages', () => {
+  const job: Job = { id: 'bulk', documentID: 'paper', state: 'failed', attempts: 1, nextRun: 0, createdAt: '' };
+  for (const code of ['PDF_MISSING', 'PDF_INVALID_HEADER', 'PDF_READ_INCOMPLETE', 'MINERU_PAGE_LIMIT', 'MINERU_FILE_TOO_LARGE']) {
+    assert.equal(canBulkResume({ ...job, error: { code, message: 'fixture', retryable: false } }), false);
+  }
+  for (const message of ['PDF 页数超过限制', 'page count exceeds the limit', 'too many pages']) {
+    const legacy = { ...job, error: { code: 'MINERU_PARSE_FAILED', message, retryable: false } };
+    assert.match(retryExclusion(legacy)!, /超限/); assert.equal(canBulkResume(legacy), false);
+  }
+  assert.equal(canBulkResume({ ...job, error: { code: 'MINERU_NETWORK_ERROR', message: 'network', retryable: true } }), true);
+});
+
+test('actual bulk recovery checks for usable PDF attachments and resumes only eligible tasks', async () => {
+  const root: any = globalThis, oldIO = root.IOUtils;
+  const lib: any = Object.create(Library.prototype);
+  const jobs: Job[] = ['retry', 'no-pdf', 'missing', 'pages', 'size', 'uncertain'].map(id => ({
+    id, documentID: id, state: 'failed', attempts: 1, nextRun: 0, createdAt: '', retryState: 'queued',
+    error: { code: ({ pages: 'MINERU_PAGE_LIMIT', size: 'MINERU_FILE_TOO_LARGE', uncertain: 'MINERU_SUBMISSION_UNCERTAIN' } as Record<string, string>)[id] || 'MINERU_NETWORK_ERROR', message: 'fixture', retryable: false }
+  }));
+  const resumed: string[] = [];
+  lib.store = { jobs: async () => structuredClone(jobs), document: async (id: string) => ({ id, libraryID: 1, attachmentKey: id === 'no-pdf' ? null : id }),
+    commit: async (_doc: any, job: Job) => { resumed.push(job.id); assert.equal(job.state, 'queued'); } };
+  lib.resolve = async (_lib: number, key: string) => ({ getFilePathAsync: async () => '/fixture/' + key });
+  lib.schedule = () => {}; lib.changed = () => {};
+  root.IOUtils = { exists: async (path: string) => !path.endsWith('missing') };
+  try {
+    const result = await lib.resume('manual');
+    assert.deepEqual(resumed, ['retry']); assert.equal(result.resumed, 1); assert.equal(result.skipped, 5);
+    assert.equal(result.exclusions['无可用 PDF 附件'], 2);
+  } finally { root.IOUtils = oldIO; }
 });
 
 function uploadFixture(state = 'queued') {

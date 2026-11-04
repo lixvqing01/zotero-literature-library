@@ -18,6 +18,10 @@ let detailFilter: any = {};
 let visibleRows: any[] = [];
 let libraryPage = 0;
 let refreshRequested = false;
+let renderedViewKey = '';
+let jobFilter = 'all';
+let jobPage = 0;
+let bulkRetryPending = false;
 const LIBRARY_PAGE_SIZE = 50;
 const settingDrafts: Record<string, string> = {};
 function rememberSettings() {
@@ -34,7 +38,7 @@ const labels: Record<string, string> = { missing: '未配置', configured: '已�
   blocked_credentials: '等待有效 Key', blocked_cloud: '等待启用上传', blocked_model: '等待模型', failed: '失败', retry: '稍后重试', metadata: '书目已存' };
 const text = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 const icon = (name: string, size = 17) => `<i data-lucide="${name}" width="${size}" height="${size}"></i>`;
-const button = (id: string, name: string, title: string, primary = false) => `<button id="${id}" class="${primary ? 'primary' : ''}" title="${text(title)}">${icon(name)}<span>${text(title)}</span></button>`;
+const button = (id: string, name: string, title: string, primary = false) => `<button type="button" id="${id}" class="${primary ? 'primary' : ''}" title="${text(title)}">${icon(name)}<span>${text(title)}</span></button>`;
 function layout() {
   setMarkup(app, `<aside class="sidebar"><div class="brand">${icon('library-big', 25)}<div>Literature<span>LIBRARY</span></div></div>
     <nav><button data-tab="library">${icon('library')}文献库<span id="nav-count"></span></button><button data-tab="jobs">${icon('list-checks')}任务队列<span id="job-count"></span></button><button data-tab="settings">${icon('settings-2')}设置</button></nav>
@@ -95,14 +99,19 @@ function render() {
     ['library', '文献条目', cov.documents], ['file-text', '摘要', cov.abstracts],
     ['file-check-2', '全文已提取', cov.fulltext], ['network', '当前模型已索引', cov.vectors]
   ].map(([symbol, label, value]) => `<div class="metric">${icon(String(symbol), 19)}<div><span>${label}</span><strong>${value}</strong></div><div class="coverage"><b style="width:${cov.documents ? Number(value) / cov.documents * 100 : 0}%"></b></div></div>`).join(''));
-  if (tab === 'library') renderLibrary(); else if (tab === 'jobs') renderJobs(); else renderSettings();
+  const viewKey = JSON.stringify(tab === 'library' ? [tab, documents] : tab === 'jobs' ? [tab, status.queue] : [tab, settingsPane, status.settings, status.credentials, status.model, status.embedding_credentials, status.agents]);
+  if (viewKey !== renderedViewKey) {
+    renderedViewKey = viewKey;
+    if (tab === 'library') renderLibrary(); else if (tab === 'jobs') renderJobs(); else renderSettings();
+  }
   createIcons({ icons, attrs: { 'stroke-width': 1.7 } });
 }
 function renderLibrary() {
   const view = byId('view');
-  setMarkup(view, `<div class="toolbar"><form id="search-form"><div class="search-input">${icon('search')}<input id="search-query" placeholder="搜索标题、作者、关键词或正文…" value="${text(searchState.query)}"/></div><select id="search-layer" aria-label="检索层"><option value="auto">所有层级</option><option value="metadata">书目</option><option value="abstract">摘要</option><option value="fulltext">全文</option></select><select id="search-mode" aria-label="检索模式"><option value="keyword">关键词</option><option value="hybrid">混合检索</option><option value="semantic">向量检索</option></select><button type="submit" class="icon-button" title="搜索">${icon('arrow-right')}</button>${button('clear-search', 'x', '清除搜索')}</form><div class="selection-actions">${button('reindex-selected', 'rotate-cw', '更新索引')}${button('remove-selected', 'trash-2', '移除')}</div></div>
+  if (!byId('search-form')) setMarkup(view, `<div class="toolbar"><form id="search-form"><div class="search-input">${icon('search')}<input id="search-query" aria-label="搜索文献" placeholder="搜索标题、作者、关键词或正文…" value="${text(searchState.query)}"/></div><select id="search-layer" aria-label="检索层"><option value="auto">所有层级</option><option value="metadata">书目</option><option value="abstract">摘要</option><option value="fulltext">全文</option></select><select id="search-mode" aria-label="检索模式"><option value="keyword">关键词</option><option value="hybrid">混合检索</option><option value="semantic">向量检索</option></select><button type="submit" class="primary" title="搜索">${icon('search')}搜索</button>${button('clear-search', 'x', '清除搜索')}</form><div class="selection-actions">${button('reindex-selected', 'rotate-cw', '更新索引')}${button('remove-selected', 'trash-2', '移除')}</div></div>
     <div class="table-wrap"><table><thead><tr><th class="check-col"><input id="select-all" type="checkbox" aria-label="全选"/></th><th>文献</th><th class="year-col">年份</th><th>覆盖层级</th><th>状态</th><th class="end-col"></th></tr></thead><tbody id="document-rows"></tbody></table></div><div id="library-empty" class="empty" ${documents.length ? 'hidden="hidden"' : ''}>${icon('library', 40)}<h2>文献库为空</h2><button id="empty-add" class="primary">${icon('plus')}加入 Zotero 所选条目</button></div><div id="search-notice" class="small-note"></div>`);
   byId('search-layer').value = searchState.layer; byId('search-mode').value = searchState.mode;
+  if (byId('search-query').value !== searchState.query) byId('search-query').value = searchState.query;
   byId('search-query').oninput = () => { searchState.query = byId('search-query').value; };
   byId('search-layer').onchange = () => { searchState.layer = byId('search-layer').value; };
   byId('search-mode').onchange = () => { searchState.mode = byId('search-mode').value; };
@@ -115,10 +124,13 @@ function renderLibrary() {
   libraryPage = Math.min(libraryPage, pageCount - 1);
   const pageRows = visibleRows.slice(libraryPage * LIBRARY_PAGE_SIZE, (libraryPage + 1) * LIBRARY_PAGE_SIZE);
   fillRows(pageRows);
+  byId('view').querySelectorAll('.list-pagination').forEach((node: Element) => node.remove());
+  byId('library-empty').hidden = !!documents.length;
+  byId('search-notice').textContent = '';
   if (response) byId('search-notice').textContent = `${visibleRows.length} 个结果 · ${response.mode === 'semantic' ? '向量检索' : response.mode === 'hybrid' ? '混合检索' : '关键词'}${response.warning ? ' · ' + response.warning.message : ''}`;
   if (pageCount > 1) {
-    const pager = document.createElement('div'); pager.className = 'list-pagination';
-    pager.innerHTML = `<button id="page-previous" ${libraryPage ? '' : 'disabled="disabled"'}>上一页</button><span>${libraryPage + 1} / ${pageCount} · ${visibleRows.length} 篇</span><button id="page-next" ${libraryPage + 1 < pageCount ? '' : 'disabled="disabled"'}>下一页</button>`;
+    const pager = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); pager.className = 'list-pagination';
+    setMarkup(pager, `<button type="button" id="page-previous" ${libraryPage ? '' : 'disabled="disabled"'}>上一页</button><span>${libraryPage + 1} / ${pageCount} · ${visibleRows.length} 篇</span><button type="button" id="page-next" ${libraryPage + 1 < pageCount ? '' : 'disabled="disabled"'}>下一页</button>`);
     byId('search-notice').before(pager);
     byId('page-previous').onclick = () => { libraryPage--; renderLibrary(); };
     byId('page-next').onclick = () => { libraryPage++; renderLibrary(); };
@@ -137,6 +149,7 @@ function renderLibrary() {
   byId('search-form').onsubmit = (event: Event) => {
     event.preventDefault(); action(async () => {
       const serial = ++searchSerial;
+      searchState.query = byId('search-query').value;
       const { query, layer, mode } = searchState;
       if (!query.trim()) { libraryPage = 0; searchState.response = null; renderLibrary(); return; }
       byId('search-notice').textContent = '正在检索…';
@@ -158,8 +171,16 @@ function fillRows(rows: any[]) {
       detailFilter = hit?.layer === 'fulltext' ? { section_id: hit.section_id, chunk_id: hit.chunk_id, ...(hit.page ? { page: hit.page } : {}) } : {};
       showDetail();
     });
-    row.querySelector('.row-check')!.addEventListener('change', (event: any) => { event.target.checked ? selection.add(id) : selection.delete(id); });
+    row.querySelector('.row-check')!.addEventListener('change', (event: any) => { event.target.checked ? selection.add(id) : selection.delete(id); syncSelection(); });
   });
+  function syncSelection() {
+    const count = rows.filter(doc => selection.has(doc.id)).length;
+    byId('select-all').checked = !!rows.length && count === rows.length;
+    byId('select-all').indeterminate = count > 0 && count < rows.length;
+    byId('reindex-selected').disabled = !selection.size;
+    byId('remove-selected').disabled = !selection.size;
+  }
+  syncSelection();
   createIcons({ icons });
 }
 async function showDetail() {
@@ -184,9 +205,53 @@ async function showDetail() {
   });
 }
 function renderJobs() {
-  const jobs = status.queue.filter((job: any) => !['done', 'skipped'].includes(job.state));
+  const activeJobs = status.queue.filter((job: any) => !['done', 'skipped'].includes(job.state));
+  const retryable = activeJobs.filter((job: any) => job.can_bulk_resume).length;
+  const filteredJobs = activeJobs.filter((job: any) => jobFilter === 'all' || (jobFilter === 'retryable' ? job.can_bulk_resume
+    : jobFilter === 'attention' ? job.error || job.retry_exclusion : !job.error && !job.retry_exclusion));
+  const pageCount = Math.max(1, Math.ceil(filteredJobs.length / LIBRARY_PAGE_SIZE));
+  jobPage = Math.min(jobPage, pageCount - 1);
+  const jobs = filteredJobs.slice(jobPage * LIBRARY_PAGE_SIZE, (jobPage + 1) * LIBRARY_PAGE_SIZE);
   setMarkup(byId('view'), `<div class="section-toolbar"><h2>处理中与失败 <span>${jobs.length}</span></h2>${button('resume-jobs', 'play', '恢复可重试任务')}</div>${jobs.length ? `<div class="table-wrap"><table><thead><tr><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${jobs.map((job: any) => `<tr><td>${text(job.documentTitle || documents.find(d => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.displayState || job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || job.progress?.message || '')}</td><td>${job.can_resume ? `<button data-retry="${text(job.id)}">${['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code) ? '恢复查询原任务' : '重试此任务'}</button>` : ''}${job.requires_rebuild ? `<button data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">等待上传确认时会持续查询原任务，不重复上传。确认超时可先恢复查询；仅在检查原任务后仍需重传时选择“检查后重建”。提交结果不确定或任务失效时仍需检查后重建。</div>` : `<div class="empty queue-empty"><h2>没有处理中或失败的任务</h2><span>新加入的文献会显示在这里；失败任务也可在此重试或检查后重建。</span></div>`}`);
-  byId('resume-jobs').onclick = () => action(async () => { const result = await bridge.resume(); await refresh(); return result.resumed ? `${result.resumed} 个任务已重新排队` : '当前没有可自动重试的任务；请查看失败详情或使用“检查后重建”'; });
+  const bulk = byId('resume-jobs');
+  byId('view').querySelector('.section-toolbar h2 span').textContent = filteredJobs.length;
+  const emptyHeading = byId('view').querySelector('.queue-empty h2');
+  if (emptyHeading && activeJobs.length) emptyHeading.textContent = '此筛选下暂无任务';
+  const taskTable = byId('view').querySelector('table');
+  if (taskTable) {
+    taskTable.classList.add('task-table');
+    taskTable.querySelectorAll('tbody tr').forEach((row: Element, index: number) => {
+      const exclusion = jobs[index].retry_exclusion;
+      if (!exclusion) return;
+      const note = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); note.className = 'small-note'; note.textContent = exclusion;
+      row.querySelector('.job-error')?.append(note);
+      const retry = row.querySelector('[data-retry]');
+      if (retry) { retry.textContent = '修正 PDF 后重试'; retry.setAttribute('title', exclusion); }
+    });
+  }
+  bulk.textContent = bulkRetryPending ? '正在检查并重试…' : `一键重试 (${retryable})`; bulk.disabled = bulkRetryPending || !retryable;
+  const controls = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); controls.className = 'queue-controls';
+  setMarkup(controls, `<div class="queue-filters" role="group" aria-label="任务筛选">${[['all', '全部待办'], ['running', '处理中'], ['retryable', '可重试'], ['attention', '需处理']].map(([value, label]) => `<button type="button" data-job-filter="${value}" aria-pressed="${jobFilter === value}">${label}</button>`).join('')}</div><span class="queue-count">${filteredJobs.length} 项 · 无 PDF、页数或大小超限自动跳过</span>`);
+  byId('view').querySelector('.section-toolbar').after(controls);
+  controls.querySelectorAll('[data-job-filter]').forEach(el => el.addEventListener('click', () => { jobFilter = el.getAttribute('data-job-filter')!; jobPage = 0; renderJobs(); }));
+  if (pageCount > 1) {
+    const pager = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); pager.className = 'list-pagination';
+    setMarkup(pager, `<button type="button" id="jobs-previous" ${jobPage ? '' : 'disabled="disabled"'}>上一页</button><span>${jobPage + 1} / ${pageCount}</span><button type="button" id="jobs-next" ${jobPage + 1 < pageCount ? '' : 'disabled="disabled"'}>下一页</button>`);
+    byId('view').append(pager);
+    byId('jobs-previous').onclick = () => { jobPage--; renderJobs(); };
+    byId('jobs-next').onclick = () => { jobPage++; renderJobs(); };
+  }
+  byId('resume-jobs').onclick = () => action(async () => {
+    if (bulkRetryPending) return;
+    bulkRetryPending = true;
+    bulk.disabled = true; bulk.textContent = '正在检查并重试…';
+    try {
+      const result = await bridge.resume();
+      const excluded = Object.entries(result.exclusions || {}).map(([cause, count]) => `${cause} ${count} 项`).join('；');
+      await refresh();
+      return `已恢复 ${result.resumed} 项${result.skipped ? `，跳过 ${result.skipped} 项：${excluded}` : ''}`;
+    } finally { bulkRetryPending = false; if (tab === 'jobs') renderJobs(); }
+  });
   document.querySelectorAll('[data-retry]').forEach(el => el.addEventListener('click', () => action(async () => {
     const job = status.queue.find((j: any) => j.id === el.getAttribute('data-retry'));
     const resumingUpload = ['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job?.error?.code);
@@ -251,10 +316,11 @@ function renderSettings() {
   }));
   if (settingsPane === 'processing') {
     byId('key-form').onsubmit = (event: Event) => { event.preventDefault(); action(async () => {
-      await bridge.saveCredentials({ key: byId('mineru-key').value, issuedAt: byId('issued-at').value, expiresAt: byId('expires-at').value });
-      byId('mineru-key').value = ''; clearSettingDrafts('mineru-key', 'issued-at', 'expires-at'); await refresh(); return 'MinerU Key 已安全保存；首次 API 请求会验证有效性';
+      const field = byId('mineru-key');
+      await bridge.saveCredentials({ key: field.value, issuedAt: byId('issued-at').value, expiresAt: byId('expires-at').value });
+      field.value = ''; clearSettingDrafts('mineru-key', 'issued-at', 'expires-at'); await refresh(); return 'MinerU Key 已安全保存；首次 API 请求会验证有效性';
     }); };
-    byId('clear-key').onclick = () => action(async () => { await bridge.saveCredentials({ clear: true }); for (const id of ['mineru-key', 'issued-at', 'expires-at']) byId(id).value = ''; clearSettingDrafts('mineru-key', 'issued-at', 'expires-at'); await refresh(); return 'MinerU Key 已清除'; });
+    byId('clear-key').onclick = () => action(async () => { const fields = ['mineru-key', 'issued-at', 'expires-at'].map(byId); await bridge.saveCredentials({ clear: true }); fields.forEach(field => { field.value = ''; }); clearSettingDrafts('mineru-key', 'issued-at', 'expires-at'); await refresh(); return 'MinerU Key 已清除'; });
     for (const [id, key] of [['auto-index', 'autoIndex'], ['ocr', 'ocr']]) byId(id).onchange = () => action(async () => { await bridge.saveSettings({ [key]: byId(id).checked }); });
   }
   if (settingsPane === 'embedding') {
@@ -265,19 +331,23 @@ function renderSettings() {
     if (byId('model-source')) byId('model-source').onchange = () => action(async () => { await bridge.saveSettings({ modelSource: byId('model-source').value }); await refresh(); });
     byId('embeddings-enabled').onchange = () => action(async () => { await bridge.saveSettings({ embeddingsEnabled: byId('embeddings-enabled').checked }); });
     if (byId('embedding-key-form')) byId('embedding-key-form').onsubmit = (event: Event) => { event.preventDefault(); action(async () => {
+      const field = byId('embedding-api-key'), key = field.value;
       await bridge.saveSettings({ embeddingApiBaseUrl: byId('embedding-api-url').value, embeddingApiModel: byId('embedding-api-model').value });
-      await bridge.saveEmbeddingCredentials({ key: byId('embedding-api-key').value }); byId('embedding-api-key').value = '';
+      await bridge.saveEmbeddingCredentials({ key }); field.value = '';
       clearSettingDrafts('embedding-api-key'); await refresh(); return '向量 API 配置已保存，Key 保存在本机凭据存储';
     }); };
     if (byId('clear-embedding-key')) byId('clear-embedding-key').onclick = () => action(async () => {
-      await bridge.saveEmbeddingCredentials({ clear: true }); byId('embedding-api-key').value = ''; clearSettingDrafts('embedding-api-key'); await refresh(); return '向量 API Key 已清除';
+      const field = byId('embedding-api-key');
+      await bridge.saveEmbeddingCredentials({ clear: true }); field.value = ''; clearSettingDrafts('embedding-api-key'); await refresh(); return '向量 API Key 已清除';
     });
     byId('test-embedding').onclick = () => action(async () => {
+      const resultNode = byId('embedding-state'), field = byId('embedding-api-key');
+      const key = field?.value.trim();
       if (settings.embeddingProvider === 'api') {
         await bridge.saveSettings({ embeddingApiBaseUrl: byId('embedding-api-url').value, embeddingApiModel: byId('embedding-api-model').value });
-        if (byId('embedding-api-key').value.trim()) { await bridge.saveEmbeddingCredentials({ key: byId('embedding-api-key').value }); byId('embedding-api-key').value = ''; }
+        if (key) { await bridge.saveEmbeddingCredentials({ key }); field.value = ''; clearSettingDrafts('embedding-api-key'); }
       }
-      byId('embedding-state').textContent = settings.embeddingProvider === 'local' ? '正在准备和测试本地模型…' : '正在请求向量 API…';
+      resultNode.textContent = settings.embeddingProvider === 'local' ? '正在准备和测试本地模型…' : '正在请求向量 API…';
       const result = await bridge.testEmbeddingModel(); await refresh();
       return `模型测试通过：${result.dimension} 维`;
     });

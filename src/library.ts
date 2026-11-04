@@ -9,7 +9,7 @@ import { Store, type Job } from './store';
 import { modelFingerprint, type ModelSource } from './models';
 import { CitationBridge } from './citation-bridge';
 import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
-import { ACTIVE, canResume, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
+import { ACTIVE, canResume, canBulkResume, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
 import { AgentInstaller } from './agent-installer';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
@@ -245,8 +245,25 @@ export class Library {
     return result;
   }
   async resume(reason: ResumeReason = 'manual', jobID?: string) {
-    let resumed = 0;
+    let resumed = 0, skipped = 0;
+    const exclusions: Record<string, number> = {};
     for (const job of await this.store.jobs()) {
+      if (reason === 'manual' && !jobID && !['done', 'skipped'].includes(job.state)) {
+        if (!canBulkResume(job)) {
+          if (!ACTIVE.includes(job.state)) { skipped++; const cause = retryExclusion(job) || '当前状态不可重试'; exclusions[cause] = (exclusions[cause] || 0) + 1; }
+          continue;
+        }
+        const doc = await this.store.document(job.documentID);
+        let hasPDF = false;
+        try {
+          if (doc?.attachmentKey) {
+            const attachment = await this.resolve(doc.libraryID, doc.attachmentKey);
+            const path = await attachment.getFilePathAsync();
+            hasPDF = !!path && await IOUtils.exists(path);
+          }
+        } catch {}
+        if (!hasPDF) { skipped++; exclusions['无可用 PDF 附件'] = (exclusions['无可用 PDF 附件'] || 0) + 1; continue; }
+      }
       if ((!jobID || job.id === jobID) && canResume(job, reason)) {
         const resumedTask = resumedJob(job);
         const saved = await this.store.document(job.documentID);
@@ -256,7 +273,7 @@ export class Library {
       }
     }
     this.schedule(); this.changed();
-    return { resumed };
+    return { resumed, skipped, exclusions };
   }
   schedule(delay = 500) {
     if (this.stopped) return;
@@ -450,7 +467,10 @@ export class Library {
       coverage: { documents: libraryDocs.length, abstracts: libraryDocs.filter(d => d.abstract).length,
         fulltext: libraryDocs.filter(d => d.hasFulltext).length, vectors: libraryDocs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.hasVectors).length },
       queue: jobs.map(job => ({ ...job, documentTitle: summaryByDocument.get(job.documentID)?.title || job.documentID,
-        displayState: displayJobState(job), can_resume: canResume(job, 'manual'), requires_rebuild: requiresRebuild(job) })),
+        displayState: displayJobState(job), can_resume: canResume(job, 'manual'),
+        can_bulk_resume: canBulkResume(job) && !!summaryByDocument.get(job.documentID)?.attachmentKey,
+        retry_exclusion: retryExclusion(job) || (!summaryByDocument.get(job.documentID)?.attachmentKey ? '无 PDF 附件' : null),
+        requires_rebuild: requiresRebuild(job) })),
       agents: await this.agentInstaller.status(), local_only: false, parsing_provider: 'mineru',
       endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
   }

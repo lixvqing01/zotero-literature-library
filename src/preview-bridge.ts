@@ -1,8 +1,10 @@
 import { readFulltext } from './retrieval';
-import { resumedJob, displayJobState, requiresRebuild } from './queue';
+import { resumedJob, displayJobState, requiresRebuild, canResume, canBulkResume, retryExclusion } from './queue';
 export function previewBridge(fixture: any) {
   return {
-    status: async () => fixture.status, list: async () => fixture.documents.filter((doc: any) => {
+    status: async () => ({ ...fixture.status, queue: fixture.status.queue.map((job: any) => ({ ...job,
+      documentTitle: fixture.documents.find((doc: any) => doc.id === job.documentID)?.title || job.documentTitle,
+      can_resume: canResume(job, 'manual'), can_bulk_resume: canBulkResume(job), retry_exclusion: retryExclusion(job) })) }), list: async () => fixture.documents.filter((doc: any) => {
       const job = fixture.status.queue.find((task: any) => task.documentID === doc.id);
       return !!doc.indexedAt || !job || ['done', 'skipped'].includes(job.state);
     }),
@@ -16,10 +18,12 @@ export function previewBridge(fixture: any) {
         fixture.status.model = { state: 'idle', dimension: null, checkedAt: null };
       return Object.assign(fixture.status.settings, input, { cloudEnabled: true });
     },
-    testCredentials: async () => ({ message: '预览模式不会调用 MinerU。' }), resume: async (id?: string) => { let resumed = 0; for (const job of fixture.status.queue) if (job.can_resume && (!id || job.id === id)) {
+    testCredentials: async () => ({ message: '预览模式不会调用 MinerU。' }), resume: async (id?: string) => { let resumed = 0, skipped = 0; for (const job of fixture.status.queue) {
+      if (!id && !canBulkResume(job) && canResume(job, 'manual')) { skipped++; continue; }
+      if (canResume(job, 'manual') && (!id || job.id === id)) {
       Object.assign(job, resumedJob(job)); job.displayState = displayJobState(job);
       job.can_resume = false; job.requires_rebuild = requiresRebuild(job); resumed++;
-    } return { resumed }; },
+    } } return { resumed, skipped, exclusions: skipped ? { '需处理 PDF': skipped } : {} }; },
     reindex: async () => {}, remove: async (id: string) => { fixture.documents = fixture.documents.filter((d: any) => d.id !== id); },
     testEmbeddingModel: async () => { fixture.status.model = { ...fixture.status.model, state: 'ready', checkedAt: new Date().toISOString(), dimension: 384, provider: fixture.status.settings.embeddingProvider, model: fixture.status.settings.embeddingProvider === 'api' ? fixture.status.settings.embeddingApiModel : fixture.status.settings.model }; return fixture.status.model; },
     installAgent: async (target: string) => { if (target === 'codex') fixture.status.agents.codex.configured = true; else fixture.status.agents.claudeCode.configured = true; return { backup: 'preview-only' }; },

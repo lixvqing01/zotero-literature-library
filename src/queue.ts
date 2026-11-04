@@ -5,6 +5,19 @@ export type ResumeReason = 'manual' | 'credentials' | 'cloud' | 'model';
 const NEEDS_REBUILD = ['MINERU_SUBMISSION_UNCERTAIN', 'MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT', 'MINERU_UPLOAD_FAILED',
   'MINERU_TASK_NOT_FOUND', 'MINERU_TASK_FORBIDDEN', 'MINERU_PARSE_FAILED', 'MINERU_BAD_RESPONSE'];
 
+export function retryExclusion(job: Job): string | null {
+  const code = job.error?.code || '';
+  if (['PDF_MISSING', 'PDF_INVALID_HEADER', 'PDF_READ_INCOMPLETE', 'ITEM_NOT_FOUND'].includes(code)) return '请先检查或补齐 PDF 附件';
+  if (['MINERU_PAGE_LIMIT', 'MINERU_FILE_TOO_LARGE'].includes(code) ||
+      /页数.*(超|限制)|超过.*页|page.{0,24}(limit|exceed)|too many pages/i.test(job.error?.message || '')) return '文件页数或大小超限，需先处理 PDF';
+  if (requiresRebuild(job) && !canResume(job, 'manual')) return '需检查原任务后单独重建';
+  return null;
+}
+
+export function canBulkResume(job: Job) {
+  return canResume(job, 'manual') && !retryExclusion(job);
+}
+
 export function canResume(job: Job, reason: ResumeReason) {
   if (['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code || ''))
     return reason === 'manual' && job.state === 'failed' && !!job.batchID && !!job.dataID;
