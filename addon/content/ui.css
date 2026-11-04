@@ -70,4 +70,28 @@ button:disabled { opacity:.45; cursor:default; }
 .security-details { margin-top:16px; color:var(--muted); font-size:11px; line-height:1.65; }
 .security-details summary { cursor:pointer; color:#547160; }
 .security-details p { margin:10px 0 0; }
+.library-sort { display:flex; justify-content:flex-end; align-items:center; gap:10px; margin:-4px 0 10px; }
+.library-sort label { flex-direction:row; align-items:center; gap:8px; margin:0; white-space:nowrap; }
+.library-sort select { width:150px; padding:7px 9px; }
+.library-sort button { padding:7px 10px; }
+.task-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; }
+.task-actions button { font-size:12px; padding:7px 10px; }
+.job-search { display:flex; gap:7px; width:min(100%,520px); margin-bottom:10px; }
+.job-search input { min-height:36px; }
+.job-search button { flex-shrink:0; font-size:12px; padding:7px 10px; }
+.task-table { min-width:900px; }
+.task-table th:nth-child(1),.task-table td:first-child { width:42px; text-align:center; }
+.task-table th:nth-child(2) { width:23%; }
+.task-table th:nth-child(3) { width:12%; }
+.task-table th:nth-child(4) { width:13%; }
+.task-table th:nth-child(5) { width:29%; }
+.task-table th:nth-child(6) { width:18%; }
+.task-table tbody tr:focus-within { background:#f0f6f1; }
+.task-table tbody tr.is-selected { background:#e8f2ed; box-shadow:inset 3px 0 var(--green); }
+.task-table tbody tr { cursor:default; }
+.task-table td:last-child { min-width:150px; }
+.context-menu { position:fixed; z-index:1000; min-width:210px; margin:0; padding:5px; list-style:none; background:white; border:1px solid #d7ddd6; border-radius:5px; box-shadow:0 8px 24px #17241d24; }
+.context-menu button { display:flex; width:100%; justify-content:flex-start; border:0; padding:9px 10px; text-align:left; font-size:12px; }
+.context-menu button:hover { background:#edf4ed; }
+@media(max-width:700px) { .library-sort { justify-content:flex-start; }.library-sort select { width:130px; }.task-actions { justify-content:flex-start; }.task-actions button { flex:1 1 130px; }.job-search { flex-wrap:wrap; }.job-search input { flex:1 1 100%; } }
 @media(max-width:700px) { .setup-tabs{gap:4px}.setup-tabs button{padding:9px 7px;font-size:10px}.setup-card{padding:17px 14px}.agent-card{align-items:flex-start;flex-direction:column}.agent-card button{width:100%}.provider-choice{padding-left:0;padding-right:0}.tooltip{left:auto;right:-4px;top:23px}.setup-footer{flex-direction:column} }

@@ -9,7 +9,7 @@ import { Store, type Job } from './store';
 import { modelFingerprint, type ModelSource } from './models';
 import { CitationBridge } from './citation-bridge';
 import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
-import { ACTIVE, canResume, canBulkResume, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
+import { ACTIVE, canResume, canBulkResume, canDeleteJob, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
 import { AgentInstaller } from './agent-installer';
 
 export interface Settings { autoIndex: boolean; cloudEnabled: boolean; model: 'qwen' | 'e5';
@@ -244,11 +244,12 @@ export class Library {
     for (const item of items) result.push(...await this.enqueueItem(item, force));
     return result;
   }
-  async resume(reason: ResumeReason = 'manual', jobID?: string) {
+  async resume(reason: ResumeReason = 'manual', jobID?: string | string[]) {
     let resumed = 0, skipped = 0;
     const exclusions: Record<string, number> = {};
+    const targetIDs = Array.isArray(jobID) ? new Set(jobID) : jobID ? new Set([jobID]) : null;
     for (const job of await this.store.jobs()) {
-      if (reason === 'manual' && !jobID && !['done', 'skipped'].includes(job.state)) {
+      if ((!targetIDs || targetIDs.has(job.id)) && reason === 'manual' && (!jobID || Array.isArray(jobID)) && !['done', 'skipped'].includes(job.state)) {
         if (!canBulkResume(job)) {
           if (!ACTIVE.includes(job.state)) { skipped++; const cause = retryExclusion(job) || '当前状态不可重试'; exclusions[cause] = (exclusions[cause] || 0) + 1; }
           continue;
@@ -264,7 +265,7 @@ export class Library {
         } catch {}
         if (!hasPDF) { skipped++; exclusions['无可用 PDF 附件'] = (exclusions['无可用 PDF 附件'] || 0) + 1; continue; }
       }
-      if ((!jobID || job.id === jobID) && canResume(job, reason)) {
+      if ((!targetIDs || targetIDs.has(job.id)) && canResume(job, reason)) {
         const resumedTask = resumedJob(job);
         const saved = await this.store.document(job.documentID);
         if (saved) { saved.error = undefined; saved.state = saved.indexedAt ? 'stale' : resumedTask.state; await this.store.commit(saved, resumedTask); }
@@ -274,6 +275,22 @@ export class Library {
     }
     this.schedule(); this.changed();
     return { resumed, skipped, exclusions };
+  }
+  async deleteJobs(jobIDs: string[]) {
+    const selected = new Set(jobIDs);
+    let deleted = 0, skipped = 0;
+    const jobs = await this.store.jobs();
+    for (const job of jobs) {
+      if (!selected.has(job.id)) continue;
+      if (!canDeleteJob(job)) { skipped++; continue; }
+      if (await this.store.deleteJob(job.id, job.documentID)) deleted++; else skipped++;
+    }
+    this.changed();
+    return { deleted, skipped };
+  }
+  async clearCompletedJobs() {
+    const jobs = await this.store.jobs();
+    return this.deleteJobs(jobs.filter(job => ['done', 'skipped'].includes(job.state)).map(job => job.id));
   }
   schedule(delay = 500) {
     if (this.stopped) return;

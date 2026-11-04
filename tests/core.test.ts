@@ -5,10 +5,10 @@ import { MinerUClient, safeRemoteURL, validateUploadPDF } from '../src/mineru';
 import { rpc } from '../src/agent';
 import { CitationBridge } from '../src/citation-bridge';
 import { rankDocuments, readFulltext } from '../src/retrieval';
-import { canResume, canBulkResume, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
+import { canResume, canBulkResume, canDeleteJob, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, sortDocuments, UPLOAD_CONFIRMATION_TIMEOUT } from '../src/queue';
 import { Library } from '../src/library';
 import { Inference } from '../src/inference';
-import { summarize } from '../src/store';
+import { Store, summarize } from '../src/store';
 import { EmbeddingAPI, embeddingURL } from '../src/embedding-api';
 import { AgentInstaller, installClaudeConfig, installCodexBlock } from '../src/agent-installer';
 import { posix } from 'node:path';
@@ -118,6 +118,83 @@ test('bulk retry excludes PDF repairs and page limits, including legacy parse-er
     assert.match(retryExclusion(legacy)!, /超限/); assert.equal(canBulkResume(legacy), false);
   }
   assert.equal(canBulkResume({ ...job, error: { code: 'MINERU_NETWORK_ERROR', message: 'network', retryable: true } }), true);
+});
+
+test('library sorting supports title, author, year, journal and state with stable title tie-breaking', () => {
+  const docs = [
+    { title: 'Zeta', creators: 'Chen, Li', year: '2020', publication: 'Nature', taskState: 'failed' },
+    { title: 'Alpha', creators: 'A. Smith', year: '2022', publication: 'Cell', taskState: 'ready' },
+    { title: 'Beta', creators: 'Chen, Li', year: '2019', publication: 'Science', taskState: 'queued' }
+  ];
+  assert.deepEqual(sortDocuments(docs, 'title', 'asc').map(doc => doc.title), ['Alpha', 'Beta', 'Zeta']);
+  assert.deepEqual(sortDocuments(docs, 'creators', 'asc').map(doc => doc.title), ['Alpha', 'Beta', 'Zeta']);
+  assert.deepEqual(sortDocuments(docs, 'year', 'desc').map(doc => doc.year), ['2022', '2020', '2019']);
+  assert.deepEqual(sortDocuments(docs, 'publication', 'asc').map(doc => doc.publication), ['Cell', 'Nature', 'Science']);
+  assert.deepEqual(sortDocuments(docs, 'state', 'asc').map(doc => doc.taskState), ['failed', 'queued', 'ready']);
+});
+
+test('task deletion skips active jobs and completed cleanup preserves failed records', async () => {
+  const lib: any = Object.create(Library.prototype);
+  const jobs: Job[] = [
+    { id: 'failed', documentID: 'failed', state: 'failed', attempts: 1, nextRun: 0, createdAt: '' },
+    { id: 'running', documentID: 'running', state: 'running', attempts: 1, nextRun: 0, createdAt: '' },
+    { id: 'blocked', documentID: 'blocked', state: 'blocked_credentials', attempts: 0, nextRun: 0, createdAt: '' },
+    { id: 'done', documentID: 'done', state: 'done', attempts: 1, nextRun: 0, createdAt: '' },
+    { id: 'skipped', documentID: 'skipped', state: 'skipped', attempts: 0, nextRun: 0, createdAt: '' }
+  ];
+  const deleted: string[] = [];
+  lib.store = { jobs: async () => jobs, deleteJob: async (id: string) => { deleted.push(id); return true; } };
+  lib.changed = () => {};
+  const result = await lib.deleteJobs(['failed', 'running', 'blocked']);
+  assert.deepEqual(result, { deleted: 2, skipped: 1 });
+  assert.deepEqual(deleted, ['failed', 'blocked']);
+  deleted.length = 0;
+  assert.deepEqual(await lib.clearCompletedJobs(), { deleted: 2, skipped: 0 });
+  assert.deepEqual(deleted, ['done', 'skipped']);
+});
+
+test('task removal validates current stored state and preserves previously indexed document data', async () => {
+  const store = new Store('/unused');
+  const tasks = new Map(['new', 'indexed', 'busy', 'changed'].map(id => [id, { id, documentID: id, state: id === 'busy' || id === 'changed' ? 'running' : 'failed' }]));
+  const docs = new Map(['new', 'indexed', 'busy', 'changed'].map(id => [id, { ...paper(id, id), ...(id === 'indexed' ? { indexedAt: '2026-01-01' } : {}) }]));
+  const summaries = new Set(docs.keys());
+  store.db = {
+    executeTransaction: async (fn: () => Promise<unknown>) => fn(),
+    valueQueryAsync: async (sql: string, params: string[]) => {
+      if (sql.startsWith('SELECT data FROM jobs')) {
+        const job = tasks.get(params[0]);
+        return job?.documentID === params[1] ? JSON.stringify(job) : null;
+      }
+      return docs.has(params[0]) ? JSON.stringify(docs.get(params[0])) : null;
+    },
+    queryAsync: async (sql: string, params: string[]) => {
+      if (sql.startsWith('DELETE FROM documents ')) docs.delete(params[0]);
+      else if (sql.startsWith('DELETE FROM document_summaries ')) summaries.delete(params[0]);
+      else if (sql.startsWith('DELETE FROM jobs ')) tasks.delete(params[0]);
+      else throw Error('Unexpected query ' + sql);
+    }
+  };
+  assert.equal(await store.deleteJob('new', 'wrong-document'), false);
+  assert.equal(await store.deleteJob('busy', 'busy'), false);
+  assert.equal(await store.deleteJob('changed', 'changed'), false);
+  assert.equal(await store.deleteJob('new', 'new'), true);
+  assert.equal(docs.has('new'), false); assert.equal(summaries.has('new'), false);
+  assert.equal(await store.deleteJob('indexed', 'indexed'), true);
+  assert.equal(docs.has('indexed'), true); assert.equal(summaries.has('indexed'), true);
+  assert.equal(docs.get('indexed')!.chunks.length, 1);
+  assert.equal(tasks.has('indexed'), false);
+  assert.equal(canDeleteJob({ state: 'blocked_model' }), true);
+  assert.equal(canDeleteJob({ state: 'uploading' }), false);
+});
+
+test('completed cleanup handles more than 500 records without silently truncating selection', async () => {
+  const lib: any = Object.create(Library.prototype);
+  const jobs = Array.from({ length: 605 }, (_, i) => ({ id: String(i), documentID: String(i), state: 'done' }));
+  const deleted = new Set<string>();
+  lib.store = { jobs: async () => jobs, deleteJob: async (id: string) => { deleted.add(id); return true; } };
+  lib.changed = () => {};
+  assert.deepEqual(await lib.clearCompletedJobs(), { deleted: 605, skipped: 0 });
+  assert.equal(deleted.size, 605);
 });
 
 test('actual bulk recovery checks for usable PDF attachments and resumes only eligible tasks', async () => {

@@ -2,6 +2,10 @@ import type { Job } from './store';
 
 export const ACTIVE = ['queued', 'waiting_file', 'submitting', 'uploading', 'pending', 'running', 'converting', 'download', 'embedding', 'retry'];
 export type ResumeReason = 'manual' | 'credentials' | 'cloud' | 'model';
+// Waiting for configuration does not run background work, so users can remove it.
+export function canDeleteJob(job: { state: string }) {
+  return ['failed', 'done', 'skipped', 'blocked_credentials', 'blocked_cloud', 'blocked_model'].includes(job.state);
+}
 const NEEDS_REBUILD = ['MINERU_SUBMISSION_UNCERTAIN', 'MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT', 'MINERU_UPLOAD_FAILED',
   'MINERU_TASK_NOT_FOUND', 'MINERU_TASK_FORBIDDEN', 'MINERU_PARSE_FAILED', 'MINERU_BAD_RESPONSE'];
 
@@ -43,6 +47,19 @@ export function displayJobState(job: Job) {
 
 export function isLibraryDocument(doc: { indexedAt?: string }, job?: Job) {
   return !!doc.indexedAt || !job || job.state === 'done' || job.state === 'skipped';
+}
+
+export type DocumentSortKey = 'title' | 'creators' | 'year' | 'publication' | 'state';
+export function sortDocuments<T extends { title?: string; creators?: string; year?: string; publication?: string; state?: string; taskState?: string }>(
+  docs: T[], key: DocumentSortKey, direction: 'asc' | 'desc') {
+  const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+  const field = (doc: T) => key === 'state' ? doc.taskState || doc.state : doc[key];
+  return [...docs].sort((a, b) => {
+    const left = String(field(a) || ''), right = String(field(b) || '');
+    if (!left || !right) return left ? -1 : right ? 1 : collator.compare(a.title || '', b.title || '');
+    const compared = collator.compare(left, right);
+    return (direction === 'asc' ? compared : -compared) || collator.compare(a.title || '', b.title || '');
+  });
 }
 
 export const UPLOAD_CONFIRMATION_TIMEOUT = 5 * 60 * 1000;

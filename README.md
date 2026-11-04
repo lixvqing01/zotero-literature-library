@@ -2,20 +2,20 @@
 
 单个 Zotero 插件：MinerU PDF → Markdown、插件内 Qwen 本地向量化或兼容 OpenAI 的 Embeddings API、分层文献查询、知识库管理界面和 MCP。普通用户无需安装 Ollama、Python、Node.js、Docker 或数据库服务。
 
-当前为 **0.3.4 测试版**。已在隔离的 Zotero 10.0.7 / Windows 配置中运行验证；清单声明 Zotero 8–10，但 8/9 尚未实机验证。测试未修改正式 Zotero 配置或文献库。
+当前为 **0.3.5 测试版**。已在隔离的 Zotero 10.0.7 / Windows 配置中运行验证；清单声明 Zotero 8–10，但 8/9 尚未实机验证。测试未修改正式 Zotero 配置或文献库。
 
-[下载 v0.3.4 测试版](https://github.com/lixvqing01/zotero-literature-library/releases/tag/v0.3.4) · [验证记录](docs/验证记录.md) · [Agent 使用说明](docs/Agent使用说明.md)
+[下载 v0.3.5 测试版](https://github.com/lixvqing01/zotero-literature-library/releases/tag/v0.3.5) · [验证记录](docs/验证记录.md) · [Agent 使用说明](docs/Agent使用说明.md)
 
 ## 安装与首次配置
 
-1. 从 [GitHub Releases](https://github.com/lixvqing01/zotero-literature-library/releases) 下载 `.xpi`。在 Zotero 的“工具 → 插件”中，选择齿轮菜单“从文件安装插件”，打开下载的安装包，按 Zotero 提示重启。开发构建产物位于 `dist/literature-library-0.3.4.xpi`。
+1. 从 [GitHub Releases](https://github.com/lixvqing01/zotero-literature-library/releases) 下载 `.xpi`。在 Zotero 的“工具 → 插件”中，选择齿轮菜单“从文件安装插件”，打开下载的安装包，按 Zotero 提示重启。开发构建产物位于 `dist/literature-library-0.3.5.xpi`。
 2. 在“工具 → 插件”的 Literature Library 卡片点击“打开知识库 / MinerU 设置”。也可以从“设置 → Literature Library”或“工具 → Literature Library”进入，条目右键菜单有“查看知识库”。
 3. 在插件设置页或管理器“设置”中输入 MinerU Key。可填写 Key **生成日期**或实际到期日期；不填时显示有效期未知。保存日期不会被当作生成日期。Key 存入 Zotero/Gecko 登录凭据存储，界面不回显；安装包不包含用户 Key。
 4. 设置页按“PDF 解析 → 向量模型 → Agent 接入”分步配置。MinerU 云解析固定开启，配置有效 Key 后才能解析 PDF；Key 旁悬停提示和链接说明获取方式。解析结果保存在本机。
 5. 在“向量模型”选择本地模型或 API。本地默认 Qwen3-Embedding-0.6B Q8（1024 维），也可选 E5-small Q8（384 维）；默认从 ModelScope 下载，可切换 hf-mirror.com / Hugging Face。点击“测试并准备模型”自动下载和推理，显示维度与测试时间。API 模式填写 Base URL、模型名和 Key 后测试连接，无需下载本地模型；文本片段会发送到所配置的服务。
 6. 选中文献，右键“加入 Literature Library”。如需自动处理后续新增条目，开启“新加入的条目自动入库”。开启不会立即批量上传全部历史文献，历史条目可手动选择加入。
 
-条目列表的列选择菜单中可启用“知识库”状态列。管理器提供覆盖数量、任务进度、失败原因、搜索、分层详情、更新索引和移除派生索引。搜索条件和结果在刷新、切换页面后保留；全选只选择当前结果。点击命中标题可阅读对应段落，并跳转到 PDF 原页；长全文支持上一段 / 下一段。任务可逐项重试，需重新提交的任务单独提示。移除派生索引保留 Zotero 条目与原 PDF；当前版本不会自动清理已下载的派生文件缓存。
+条目列表的列选择菜单中可启用“知识库”状态列。管理器提供覆盖数量、任务进度、失败原因、搜索、分层详情、更新索引和移除派生索引。搜索条件和结果在刷新、切换页面后保留；全选只选择当前页。文献库可按标题、作者、年份、期刊、状态升降序排列，新搜索默认按检索相关度显示。点击命中标题可阅读对应段落，并跳转到 PDF 原页；长全文支持上一段 / 下一段。任务队列支持按标题/错误/阶段搜索、状态筛选、逐项或多选重试、右键操作、删除任务和清理已完成记录；Ctrl/Cmd 多选、Shift 连选及跨页选择会保留。批量重试排除无 PDF、页数或大小超限等任务；需重新提交的任务单独提示。失败或等待凭据/模型的任务可以删除，处理中任务需等待结束。删除失败更新任务会保留之前成功的索引。移除派生索引保留 Zotero 条目与原 PDF；当前版本不会自动清理已下载的派生文件缓存。
 
 ## 从旧版本升级
 
@@ -89,10 +89,10 @@ npm test
 npm run build
 ```
 
-`npm run preview` 启动 `http://127.0.0.1:4179` 管理页，**使用演示数据**；`node scripts/check-ui.mjs` 检查桌面/窄屏布局；`node scripts/check-ui-interactions.mjs` 检查大列表、XHTML 分页、搜索输入稳定性与批量重试排除。
+`npm run preview` 启动 `http://127.0.0.1:4179` 管理页，**使用演示数据**；`node scripts/check-ui.mjs` 检查桌面/窄屏布局；`node scripts/check-ui-interactions.mjs` 检查大列表、XHTML 分页、搜索输入稳定性与批量重试排除；`node scripts/check-ui-queue.mjs` 检查跨页连选、变化中的进度刷新、右键批量操作、任务删除和相关度排序，使用独立内存宿主桥，不连接真实 Zotero。
 
 `node scripts/setup-zotero-test.mjs` 准备 `.test-profile` 与 `.test-data` 隔离测试配置。用 Zotero `-no-remote -profile <绝对路径>` 启动该配置后，测试版插件生成 `integration-report.json`；`node scripts/check-mcp.mjs` 执行真实 HTTP 测试。测试 harness 只打进隔离测试包，不进入发布 XPI。
 
-已验证：32 项核心测试、真实 Zotero 启动/凭据/GUI/入库/自动通知、MinerU 模拟过期恢复与重复跳过、Qwen/E5 真实 WASM 推理、Qwen 向量存储与语义检索、MCP 真实 HTTP、管理页桌面与窄屏检查。0.3.4 新增修复仅在后台模拟与界面回归中验证，没有操作用户桌面或调用真实云解析。
+已验证：36 项核心测试、真实 Zotero 启动/凭据/GUI/入库/自动通知、MinerU 模拟过期恢复与重复跳过、Qwen/E5 真实 WASM 推理、Qwen 向量存储与语义检索、MCP 真实 HTTP、管理页桌面与窄屏检查。0.3.5 新增修复仅在后台模拟与界面回归中验证，没有操作用户桌面或调用真实云解析。
 
 源码独立实现，第三方运行时及模型许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。源码托管于 GitHub，安装包通过 Releases 分发；插件更新清单位于仓库的 `updates.json`。GitHub Actions 对推送和 Pull Request 执行类型检查、核心测试及 XPI 构建；原生 Zotero 集成检查仍需本机执行。

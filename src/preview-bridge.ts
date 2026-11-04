@@ -1,5 +1,5 @@
 import { readFulltext } from './retrieval';
-import { resumedJob, displayJobState, requiresRebuild, canResume, canBulkResume, retryExclusion } from './queue';
+import { resumedJob, displayJobState, requiresRebuild, canResume, canBulkResume, canDeleteJob, retryExclusion } from './queue';
 export function previewBridge(fixture: any) {
   return {
     status: async () => ({ ...fixture.status, queue: fixture.status.queue.map((job: any) => ({ ...job,
@@ -18,12 +18,33 @@ export function previewBridge(fixture: any) {
         fixture.status.model = { state: 'idle', dimension: null, checkedAt: null };
       return Object.assign(fixture.status.settings, input, { cloudEnabled: true });
     },
-    testCredentials: async () => ({ message: '预览模式不会调用 MinerU。' }), resume: async (id?: string) => { let resumed = 0, skipped = 0; for (const job of fixture.status.queue) {
-      if (!id && !canBulkResume(job) && canResume(job, 'manual')) { skipped++; continue; }
-      if (canResume(job, 'manual') && (!id || job.id === id)) {
+    testCredentials: async () => ({ message: '预览模式不会调用 MinerU。' }), resume: async (id?: string | string[]) => { let resumed = 0, skipped = 0; for (const job of fixture.status.queue) {
+      const selected = Array.isArray(id) ? id.includes(job.id) : !id || job.id === id;
+      if (!selected) continue;
+      if ((!id || Array.isArray(id)) && !canBulkResume(job) && canResume(job, 'manual')) { skipped++; continue; }
+      if (canResume(job, 'manual')) {
       Object.assign(job, resumedJob(job)); job.displayState = displayJobState(job);
       job.can_resume = false; job.requires_rebuild = requiresRebuild(job); resumed++;
     } } return { resumed, skipped, exclusions: skipped ? { '需处理 PDF': skipped } : {} }; },
+    deleteJobs: async (ids: string[]) => {
+      const allowed = new Set(ids); let deleted = 0, skipped = 0;
+      fixture.status.queue = fixture.status.queue.filter((job: any) => {
+        if (!allowed.has(job.id)) return true;
+        if (!canDeleteJob(job)) { skipped++; return true; }
+        fixture.documents = fixture.documents.filter((doc: any) => doc.id !== job.documentID || doc.indexedAt);
+        deleted++; return false;
+      });
+      return { deleted, skipped };
+    },
+    clearCompletedJobs: async () => {
+      const completed = fixture.status.queue.filter((job: any) => ['done', 'skipped'].includes(job.state)).map((job: any) => job.id);
+      const allowed = new Set(completed); let deleted = 0;
+      fixture.status.queue = fixture.status.queue.filter((job: any) => {
+        if (!allowed.has(job.id)) return true;
+        deleted++; return false;
+      });
+      return { deleted, skipped: 0 };
+    },
     reindex: async () => {}, remove: async (id: string) => { fixture.documents = fixture.documents.filter((d: any) => d.id !== id); },
     testEmbeddingModel: async () => { fixture.status.model = { ...fixture.status.model, state: 'ready', checkedAt: new Date().toISOString(), dimension: 384, provider: fixture.status.settings.embeddingProvider, model: fixture.status.settings.embeddingProvider === 'api' ? fixture.status.settings.embeddingApiModel : fixture.status.settings.model }; return fixture.status.model; },
     installAgent: async (target: string) => { if (target === 'codex') fixture.status.agents.codex.configured = true; else fixture.status.agents.claudeCode.configured = true; return { backup: 'preview-only' }; },

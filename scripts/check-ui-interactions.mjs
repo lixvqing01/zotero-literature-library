@@ -6,6 +6,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  page.on('dialog', dialog => dialog.accept());
   await page.addInitScript(() => {
     const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
     Object.defineProperty(Element.prototype, 'innerHTML', { ...descriptor, set(value) {
@@ -32,6 +33,13 @@ try {
   await page.locator('#page-next').click();
   assert.equal(await page.locator('#document-rows tr').count(), 23);
   await page.locator('#page-previous').click();
+  await page.locator('#library-sort').selectOption('publication');
+  assert.match(await page.locator('#document-rows tr:first-child').innerText(), /Qwen3 Embedding/);
+  await page.locator('#library-sort').selectOption('title');
+  assert.match(await page.locator('#document-rows tr:first-child').innerText(), /Attention Is All You Need/);
+  await page.locator('#library-sort-direction').click();
+  assert.doesNotMatch(await page.locator('#document-rows tr:first-child').innerText(), /Attention Is All You Need/);
+  await page.locator('#library-sort-direction').click();
 
   await page.locator('#search-query').click();
   await page.locator('#search-query').pressSequentially('Attention', { delay: 30 });
@@ -60,6 +68,12 @@ try {
   await page.locator('[data-job-filter="attention"]').click();
   await page.getByText('Page limit fixture', { exact: true }).waitFor();
   await page.getByText('No PDF fixture', { exact: true }).waitFor();
+  await page.locator('#job-search-query').fill('Page limit');
+  await page.locator('#job-search-form').evaluate(form => form.requestSubmit());
+  assert.equal(await page.locator('#view tbody tr').count(), 1);
+  await page.getByText('Page limit fixture', { exact: true }).waitFor();
+  await page.locator('#clear-job-search').click();
+  assert.equal(await page.locator('#view tbody tr').count(), 5);
   await page.locator('[data-job-filter="retryable"]').click();
   assert.equal(await page.locator('#view tbody tr').count(), 2);
   assert.equal(await page.getByText('No PDF fixture', { exact: true }).count(), 0);
@@ -71,6 +85,21 @@ try {
   await page.getByText('Page limit fixture', { exact: true }).waitFor();
   await page.getByText('No PDF fixture', { exact: true }).waitFor();
   await page.screenshot({ path: 'test-output/ui-queue-filtered.png', fullPage: true });
+  await page.locator('[data-job-filter="attention"]').click();
+  await page.locator('#select-all-jobs').check();
+  assert.equal(await page.locator('#retry-selected').isDisabled(), true);
+  assert.equal(await page.locator('#delete-selected').isEnabled(), true);
+  await page.locator('[data-job-id="j3"]').click({ button: 'right' });
+  await page.locator('#task-context-menu').waitFor({ state: 'visible' });
+  await page.locator('#task-context-rebuild').click();
+  await page.locator('#notification').filter({ hasText: '已加入重建队列' }).waitFor();
+  await page.locator('#delete-selected').click();
+  await page.locator('#notification').filter({ hasText: '已删除 3 项' }).waitFor();
+  assert.equal(await page.locator('[data-job-filter="attention"]').getAttribute('aria-pressed'), 'true');
+  await page.locator('[data-job-filter="completed"]').click();
+  await page.locator('#clear-completed').click();
+  await page.locator('#notification').filter({ hasText: '已清理 1 个已完成任务' }).waitFor();
+  assert.equal(await page.locator('[data-job-id="finished"]').count(), 0);
   for (const width of [960, 390]) {
     await page.setViewportSize({ width, height: 844 });
     await page.locator('[data-tab="library"]').click();

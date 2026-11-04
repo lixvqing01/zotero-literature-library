@@ -1,5 +1,6 @@
 import { createIcons, icons } from 'lucide';
 import { setMarkup } from './markup';
+import { sortDocuments, canDeleteJob, type DocumentSortKey } from './queue';
 type Bridge = any;
 const app = document.getElementById('app')!;
 let bridge: Bridge;
@@ -20,8 +21,16 @@ let libraryPage = 0;
 let refreshRequested = false;
 let renderedViewKey = '';
 let jobFilter = 'all';
+let jobQuery = '';
+let jobQueryDraft = '';
 let jobPage = 0;
 let bulkRetryPending = false;
+let jobActionPending = false;
+const taskSelection = new Set<string>();
+let contextJob: any = null;
+let librarySortKey: DocumentSortKey | 'relevance' = 'title';
+let librarySortDirection: 'asc' | 'desc' = 'asc';
+let taskSelectionAnchor: string | null = null;
 const LIBRARY_PAGE_SIZE = 50;
 const settingDrafts: Record<string, string> = {};
 function rememberSettings() {
@@ -47,8 +56,12 @@ function layout() {
     <div id="notification" role="status" hidden="hidden"></div><div id="credential-warning" hidden="hidden"></div>
     <section id="summary" class="summary"></section><div id="view"></div>
     <footer><span>MinerU 解析 · 本地向量化</span><span id="footer-state"></span></footer></main>
-    <dialog id="detail-dialog"><div class="dialog-head"><h2 id="detail-title"></h2><button id="close-detail" class="icon-button" title="关闭">${icon('x')}</button></div><div class="detail-tabs"><button data-layer="metadata">书目</button><button data-layer="abstract">摘要</button><button data-layer="outline">目录</button><button data-layer="fulltext">全文</button><button data-layer="notes">笔记</button></div><div id="detail-content"></div><div class="dialog-bottom"><a id="open-zotero">在 Zotero 中打开 ${icon('arrow-up-right', 14)}</a></div></dialog>`);
-  document.querySelectorAll('[data-tab]').forEach(el => el.addEventListener('click', () => { rememberSettings(); tab = el.getAttribute('data-tab')!; render(); }));
+    <menu id="task-context-menu" class="context-menu" hidden="hidden"><button type="button" id="task-context-retry">重试所选任务</button><button type="button" id="task-context-rebuild">检查后重建</button><button type="button" id="task-context-delete">删除所选任务</button></menu><dialog id="detail-dialog"><div class="dialog-head"><h2 id="detail-title"></h2><button id="close-detail" class="icon-button" title="关闭">${icon('x')}</button></div><div class="detail-tabs"><button data-layer="metadata">书目</button><button data-layer="abstract">摘要</button><button data-layer="outline">目录</button><button data-layer="fulltext">全文</button><button data-layer="notes">笔记</button></div><div id="detail-content"></div><div class="dialog-bottom"><a id="open-zotero">在 Zotero 中打开 ${icon('arrow-up-right', 14)}</a></div></dialog>`);
+  document.querySelectorAll('[data-tab]').forEach(el => el.addEventListener('click', () => { hideTaskMenu(); rememberSettings(); tab = el.getAttribute('data-tab')!; render(); }));
+  document.addEventListener('click', event => { if (!(event.target as Element).closest('#task-context-menu')) byId('task-context-menu').hidden = true; });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTaskMenu(); });
+  window.addEventListener('resize', hideTaskMenu);
+  window.addEventListener('scroll', hideTaskMenu, true);
   byId('refresh').onclick = () => refresh();
   byId('add-selected').onclick = () => action(async () => {
     const jobs = await bridge.enqueueSelected(); await refresh(); return `${jobs.length} 个任务已加入队列`;
@@ -59,6 +72,16 @@ function layout() {
   }));
 }
 function byId(id: string): any { return document.getElementById(id); }
+function hideTaskMenu() { if (byId('task-context-menu')) byId('task-context-menu').hidden = true; }
+function runJobAction(fn: () => Promise<any>) {
+  if (jobActionPending) return;
+  jobActionPending = true;
+  if (tab === 'jobs') renderJobs();
+  return action(async () => {
+    try { return await fn(); }
+    finally { jobActionPending = false; if (tab === 'jobs') renderJobs(); }
+  });
+}
 function notify(message: string, error = false) {
   const node = byId('notification'); node.hidden = false; node.className = error ? 'error' : 'success'; node.textContent = message;
 }
@@ -109,17 +132,18 @@ function render() {
 function renderLibrary() {
   const view = byId('view');
   if (!byId('search-form')) setMarkup(view, `<div class="toolbar"><form id="search-form"><div class="search-input">${icon('search')}<input id="search-query" aria-label="搜索文献" placeholder="搜索标题、作者、关键词或正文…" value="${text(searchState.query)}"/></div><select id="search-layer" aria-label="检索层"><option value="auto">所有层级</option><option value="metadata">书目</option><option value="abstract">摘要</option><option value="fulltext">全文</option></select><select id="search-mode" aria-label="检索模式"><option value="keyword">关键词</option><option value="hybrid">混合检索</option><option value="semantic">向量检索</option></select><button type="submit" class="primary" title="搜索">${icon('search')}搜索</button>${button('clear-search', 'x', '清除搜索')}</form><div class="selection-actions">${button('reindex-selected', 'rotate-cw', '更新索引')}${button('remove-selected', 'trash-2', '移除')}</div></div>
-    <div class="table-wrap"><table><thead><tr><th class="check-col"><input id="select-all" type="checkbox" aria-label="全选"/></th><th>文献</th><th class="year-col">年份</th><th>覆盖层级</th><th>状态</th><th class="end-col"></th></tr></thead><tbody id="document-rows"></tbody></table></div><div id="library-empty" class="empty" ${documents.length ? 'hidden="hidden"' : ''}>${icon('library', 40)}<h2>文献库为空</h2><button id="empty-add" class="primary">${icon('plus')}加入 Zotero 所选条目</button></div><div id="search-notice" class="small-note"></div>`);
+    <div class="library-sort"><label>排序<select id="library-sort"><option value="relevance">检索相关度</option><option value="title">标题</option><option value="creators">作者</option><option value="year">年份</option><option value="publication">期刊</option><option value="state">状态</option></select></label>${button('library-sort-direction', 'arrow-down-wide-narrow', '升序')}</div><div class="table-wrap"><table><thead><tr><th class="check-col"><input id="select-all" type="checkbox" aria-label="选择本页全部文献"/></th><th>文献</th><th class="year-col">年份</th><th>覆盖层级</th><th>状态</th><th class="end-col"></th></tr></thead><tbody id="document-rows"></tbody></table></div><div id="library-empty" class="empty" ${documents.length ? 'hidden="hidden"' : ''}>${icon('library', 40)}<h2>文献库为空</h2><button id="empty-add" class="primary">${icon('plus')}加入 Zotero 所选条目</button></div><div id="search-notice" class="small-note"></div>`);
   byId('search-layer').value = searchState.layer; byId('search-mode').value = searchState.mode;
   if (byId('search-query').value !== searchState.query) byId('search-query').value = searchState.query;
   byId('search-query').oninput = () => { searchState.query = byId('search-query').value; };
   byId('search-layer').onchange = () => { searchState.layer = byId('search-layer').value; };
   byId('search-mode').onchange = () => { searchState.mode = byId('search-mode').value; };
-  byId('clear-search').onclick = () => { searchSerial++; libraryPage = 0; searchState.query = ''; searchState.response = null; renderLibrary(); };
+  byId('clear-search').onclick = () => { searchSerial++; libraryPage = 0; searchState.query = ''; searchState.response = null; if (librarySortKey === 'relevance') librarySortKey = 'title'; renderLibrary(); };
   const response = searchState.response;
   visibleRows = response ? response.results.map((hit: any) => {
     const doc = documents.find(d => d.id === hit.document_id); return doc ? { ...doc, hit } : null;
   }).filter(Boolean) : documents;
+  if (librarySortKey !== 'relevance') visibleRows = sortDocuments(visibleRows, librarySortKey, librarySortDirection);
   const pageCount = Math.max(1, Math.ceil(visibleRows.length / LIBRARY_PAGE_SIZE));
   libraryPage = Math.min(libraryPage, pageCount - 1);
   const pageRows = visibleRows.slice(libraryPage * LIBRARY_PAGE_SIZE, (libraryPage + 1) * LIBRARY_PAGE_SIZE);
@@ -136,6 +160,12 @@ function renderLibrary() {
     byId('page-next').onclick = () => { libraryPage++; renderLibrary(); };
   }
   byId('select-all').onchange = (event: any) => { pageRows.forEach(d => event.target.checked ? selection.add(d.id) : selection.delete(d.id)); fillRows(pageRows); };
+  byId('library-sort').value = librarySortKey;
+  byId('library-sort-direction').textContent = librarySortDirection === 'asc' ? '升序' : '降序';
+  byId('library-sort-direction').disabled = librarySortKey === 'relevance';
+  byId('library-sort').querySelector('[value="relevance"]').disabled = !response;
+  byId('library-sort').onchange = () => { librarySortKey = byId('library-sort').value; libraryPage = 0; renderLibrary(); };
+  byId('library-sort-direction').onclick = () => { librarySortDirection = librarySortDirection === 'asc' ? 'desc' : 'asc'; renderLibrary(); };
   byId('empty-add')?.addEventListener('click', () => byId('add-selected').click());
   byId('reindex-selected').onclick = () => action(async () => {
     if (!selection.size) return '请先选择文献';
@@ -151,12 +181,13 @@ function renderLibrary() {
       const serial = ++searchSerial;
       searchState.query = byId('search-query').value;
       const { query, layer, mode } = searchState;
-      if (!query.trim()) { libraryPage = 0; searchState.response = null; renderLibrary(); return; }
+      if (!query.trim()) { libraryPage = 0; searchState.response = null; if (librarySortKey === 'relevance') librarySortKey = 'title'; renderLibrary(); return; }
       byId('search-notice').textContent = '正在检索…';
       const response = await bridge.search({ query, layer, mode, top_k: 50 });
       if (serial !== searchSerial) return;
       libraryPage = 0;
       searchState.response = response;
+      librarySortKey = 'relevance';
       if (tab === 'library') renderLibrary();
     });
   };
@@ -205,22 +236,69 @@ async function showDetail() {
   });
 }
 function renderJobs() {
-  const activeJobs = status.queue.filter((job: any) => !['done', 'skipped'].includes(job.state));
+  hideTaskMenu();
+  if (!byId('job-search-form')) {
+    setMarkup(byId('view'), `<form id="job-search-form" class="job-search"><input id="job-search-query" type="search" aria-label="搜索任务" placeholder="按文献标题、错误或阶段搜索任务" value="${text(jobQueryDraft)}"/><button type="submit">搜索任务</button><button type="button" id="clear-job-search">清除</button></form><div id="jobs-content"></div>`);
+  }
+  byId('job-search-query').oninput = () => { jobQueryDraft = byId('job-search-query').value; byId('clear-job-search').disabled = !jobQueryDraft && !jobQuery; };
+  byId('job-search-form').onsubmit = (event: Event) => {
+    event.preventDefault(); jobQuery = jobQueryDraft; jobPage = 0; renderJobs();
+  };
+  byId('clear-job-search').disabled = !jobQueryDraft && !jobQuery;
+  byId('clear-job-search').onclick = () => { jobQueryDraft = jobQuery = ''; byId('job-search-query').value = ''; jobPage = 0; renderJobs(); };
+  const allJobs = status.queue;
+  const jobIDs = new Set(allJobs.map((job: any) => job.id));
+  for (const id of taskSelection) if (!jobIDs.has(id)) taskSelection.delete(id);
+  const activeJobs = allJobs.filter((job: any) => !['done', 'skipped'].includes(job.state));
   const retryable = activeJobs.filter((job: any) => job.can_bulk_resume).length;
-  const filteredJobs = activeJobs.filter((job: any) => jobFilter === 'all' || (jobFilter === 'retryable' ? job.can_bulk_resume
-    : jobFilter === 'attention' ? job.error || job.retry_exclusion : !job.error && !job.retry_exclusion));
+  const filteredJobs = (jobFilter === 'completed' ? allJobs.filter((job: any) => ['done', 'skipped'].includes(job.state)) : activeJobs)
+    .filter((job: any) => jobFilter === 'all' || jobFilter === 'completed' || (jobFilter === 'retryable' ? job.can_bulk_resume
+      : jobFilter === 'attention' ? job.error || job.retry_exclusion : !job.error && !job.retry_exclusion))
+    .filter((job: any) => !jobQuery.trim() || `${job.documentTitle || documents.find((d: any) => d.id === job.documentID)?.title || ''} ${job.error?.message || ''} ${job.progress?.message || ''} ${labels[job.displayState || job.state] || job.state}`.toLocaleLowerCase().includes(jobQuery.trim().toLocaleLowerCase()));
   const pageCount = Math.max(1, Math.ceil(filteredJobs.length / LIBRARY_PAGE_SIZE));
   jobPage = Math.min(jobPage, pageCount - 1);
   const jobs = filteredJobs.slice(jobPage * LIBRARY_PAGE_SIZE, (jobPage + 1) * LIBRARY_PAGE_SIZE);
-  setMarkup(byId('view'), `<div class="section-toolbar"><h2>处理中与失败 <span>${jobs.length}</span></h2>${button('resume-jobs', 'play', '恢复可重试任务')}</div>${jobs.length ? `<div class="table-wrap"><table><thead><tr><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${jobs.map((job: any) => `<tr><td>${text(job.documentTitle || documents.find(d => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.displayState || job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || job.progress?.message || '')}</td><td>${job.can_resume ? `<button data-retry="${text(job.id)}">${['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code) ? '恢复查询原任务' : '重试此任务'}</button>` : ''}${job.requires_rebuild ? `<button data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">等待上传确认时会持续查询原任务，不重复上传。确认超时可先恢复查询；仅在检查原任务后仍需重传时选择“检查后重建”。提交结果不确定或任务失效时仍需检查后重建。</div>` : `<div class="empty queue-empty"><h2>没有处理中或失败的任务</h2><span>新加入的文献会显示在这里；失败任务也可在此重试或检查后重建。</span></div>`}`);
+  const selectedJobs = allJobs.filter((job: any) => taskSelection.has(job.id));
+  const selectedRetryable = selectedJobs.filter((job: any) => job.can_bulk_resume).length;
+  const selectedDeletable = selectedJobs.filter(canDeleteJob).length;
+  setMarkup(byId('jobs-content'), `<div class="section-toolbar"><h2>任务队列 <span>${filteredJobs.length}</span></h2><div class="task-actions"><button type="button" id="retry-selected" ${selectedRetryable ? '' : 'disabled="disabled"'}>重试所选 (${selectedRetryable})</button><button type="button" id="delete-selected" ${selectedDeletable ? '' : 'disabled="disabled"'}>删除所选 (${selectedDeletable})</button><button type="button" id="clear-task-selection" ${taskSelection.size ? '' : 'disabled="disabled"'}>清除选择 (${taskSelection.size})</button><button type="button" id="clear-completed" ${allJobs.some((job: any) => ['done', 'skipped'].includes(job.state)) ? '' : 'disabled="disabled"'}>清理已完成</button>${button('resume-jobs', 'play', '一键重试')}</div></div>${jobs.length ? `<div class="table-wrap"><table class="task-table"><thead><tr><th><input type="checkbox" id="select-all-jobs" aria-label="选择本页任务"/></th><th>文献</th><th>阶段</th><th>进度</th><th>详情</th><th>操作</th></tr></thead><tbody>${jobs.map((job: any) => `<tr data-job-id="${text(job.id)}" class="${taskSelection.has(job.id) ? 'is-selected' : ''}"><td><input type="checkbox" class="task-check" data-task-check="${text(job.id)}" ${taskSelection.has(job.id) ? 'checked="checked"' : ''}/></td><td>${text(job.documentTitle || documents.find((d: any) => d.id === job.documentID)?.title || job.documentID)}</td><td><span class="badge ${job.error ? 'warning' : ''}">${text(labels[job.displayState || job.state] || job.state)}</span></td><td>${job.progress?.embedded !== undefined ? `${job.progress.embedded} / ${job.progress.total} 块` : job.progress?.extracted_pages !== undefined ? `${job.progress.extracted_pages} / ${job.progress.total_pages} 页` : '—'}</td><td class="job-error">${text(job.error?.message || job.progress?.message || '')}</td><td>${job.can_resume ? `<button type="button" data-retry="${text(job.id)}">${['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job.error?.code) ? '恢复查询原任务' : '重试此任务'}</button>` : ''}${job.requires_rebuild ? `<button type="button" data-rebuild="${text(job.documentID)}">检查后重建</button>` : ''}${canDeleteJob(job) ? `<button type="button" data-delete-job="${text(job.id)}">删除任务</button>` : ''}</td></tr>`).join('')}</tbody></table></div><div class="small-note">右键任务可对所选项批量重试或删除，也可检查后重建当前任务。删除只移除任务和未成功的派生数据，不影响 Zotero 条目/PDF。</div>` : `<div class="empty queue-empty"><h2>${activeJobs.length ? '此筛选下暂无任务' : '没有待办任务'}</h2><span>失败任务可多选后批量重试或删除。</span></div>`}`);
   const bulk = byId('resume-jobs');
   byId('view').querySelector('.section-toolbar h2 span').textContent = filteredJobs.length;
   const emptyHeading = byId('view').querySelector('.queue-empty h2');
   if (emptyHeading && activeJobs.length) emptyHeading.textContent = '此筛选下暂无任务';
   const taskTable = byId('view').querySelector('table');
   if (taskTable) {
-    taskTable.classList.add('task-table');
     taskTable.querySelectorAll('tbody tr').forEach((row: Element, index: number) => {
+      const job: any = jobs[index];
+      const selectJob = (checked: boolean, shiftKey: boolean) => {
+        const start = taskSelectionAnchor ? filteredJobs.findIndex((value: any) => value.id === taskSelectionAnchor) : -1;
+        const end = jobPage * LIBRARY_PAGE_SIZE + index;
+        const range = shiftKey && start >= 0 ? filteredJobs.slice(Math.min(start, end), Math.max(start, end) + 1) : [job];
+        range.forEach((value: any) => checked ? taskSelection.add(value.id) : taskSelection.delete(value.id));
+        taskSelectionAnchor = job.id; renderJobs();
+      };
+      row.querySelector('.task-check')!.addEventListener('click', (event: Event) => {
+        const mouse = event as MouseEvent;
+        selectJob((event.target as HTMLInputElement).checked, mouse.shiftKey);
+      });
+      row.addEventListener('click', (event: Event) => {
+        if ((event.target as Element).closest('button,input,a')) return;
+        const mouse = event as MouseEvent;
+        if (!mouse.ctrlKey && !mouse.metaKey && !mouse.shiftKey) taskSelection.clear();
+        selectJob(mouse.ctrlKey || mouse.metaKey ? !taskSelection.has(job.id) : true, mouse.shiftKey);
+      });
+      row.addEventListener('contextmenu', (event: Event) => {
+        event.preventDefault(); contextJob = job;
+        if (!taskSelection.has(job.id)) { taskSelection.clear(); taskSelection.add(job.id); }
+        renderJobs();
+        const menu = byId('task-context-menu'); menu.hidden = false;
+        const selectedTasks = status.queue.filter((item: any) => taskSelection.has(item.id));
+        byId('task-context-retry').disabled = jobActionPending || !selectedTasks.some((item: any) => item.can_bulk_resume);
+        byId('task-context-rebuild').disabled = jobActionPending || !job.requires_rebuild;
+        byId('task-context-delete').disabled = jobActionPending || !selectedTasks.some(canDeleteJob);
+        menu.style.left = `${Math.max(8, Math.min((event as MouseEvent).clientX, innerWidth - 240))}px`;
+        menu.style.top = `${Math.max(8, Math.min((event as MouseEvent).clientY, innerHeight - 130))}px`;
+      });
       const exclusion = jobs[index].retry_exclusion;
       if (!exclusion) return;
       const note = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); note.className = 'small-note'; note.textContent = exclusion;
@@ -229,19 +307,28 @@ function renderJobs() {
       if (retry) { retry.textContent = '修正 PDF 后重试'; retry.setAttribute('title', exclusion); }
     });
   }
+  const selectAllJobs = byId('select-all-jobs');
+  if (selectAllJobs) {
+    const selectedOnPage = jobs.filter((job: any) => taskSelection.has(job.id)).length;
+    selectAllJobs.checked = jobs.length > 0 && selectedOnPage === jobs.length;
+    selectAllJobs.indeterminate = selectedOnPage > 0 && selectedOnPage < jobs.length;
+    selectAllJobs.onchange = (event: any) => {
+      jobs.forEach((job: any) => event.target.checked ? taskSelection.add(job.id) : taskSelection.delete(job.id)); renderJobs();
+    };
+  }
   bulk.textContent = bulkRetryPending ? '正在检查并重试…' : `一键重试 (${retryable})`; bulk.disabled = bulkRetryPending || !retryable;
   const controls = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); controls.className = 'queue-controls';
-  setMarkup(controls, `<div class="queue-filters" role="group" aria-label="任务筛选">${[['all', '全部待办'], ['running', '处理中'], ['retryable', '可重试'], ['attention', '需处理']].map(([value, label]) => `<button type="button" data-job-filter="${value}" aria-pressed="${jobFilter === value}">${label}</button>`).join('')}</div><span class="queue-count">${filteredJobs.length} 项 · 无 PDF、页数或大小超限自动跳过</span>`);
+  setMarkup(controls, `<div class="queue-filters" role="group" aria-label="任务筛选">${[['all', '全部待办'], ['running', '处理中'], ['retryable', '可重试'], ['attention', '需处理'], ['completed', '已完成']].map(([value, label]) => `<button type="button" data-job-filter="${value}" aria-pressed="${jobFilter === value}">${label}</button>`).join('')}</div><span class="queue-count">${filteredJobs.length} 项 · 无 PDF、页数或大小超限自动跳过</span>`);
   byId('view').querySelector('.section-toolbar').after(controls);
   controls.querySelectorAll('[data-job-filter]').forEach(el => el.addEventListener('click', () => { jobFilter = el.getAttribute('data-job-filter')!; jobPage = 0; renderJobs(); }));
   if (pageCount > 1) {
     const pager = document.createElementNS('http://www.w3.org/1999/xhtml', 'div'); pager.className = 'list-pagination';
     setMarkup(pager, `<button type="button" id="jobs-previous" ${jobPage ? '' : 'disabled="disabled"'}>上一页</button><span>${jobPage + 1} / ${pageCount}</span><button type="button" id="jobs-next" ${jobPage + 1 < pageCount ? '' : 'disabled="disabled"'}>下一页</button>`);
-    byId('view').append(pager);
+    byId('jobs-content').append(pager);
     byId('jobs-previous').onclick = () => { jobPage--; renderJobs(); };
     byId('jobs-next').onclick = () => { jobPage++; renderJobs(); };
   }
-  byId('resume-jobs').onclick = () => action(async () => {
+  byId('resume-jobs').onclick = () => runJobAction(async () => {
     if (bulkRetryPending) return;
     bulkRetryPending = true;
     bulk.disabled = true; bulk.textContent = '正在检查并重试…';
@@ -252,17 +339,52 @@ function renderJobs() {
       return `已恢复 ${result.resumed} 项${result.skipped ? `，跳过 ${result.skipped} 项：${excluded}` : ''}`;
     } finally { bulkRetryPending = false; if (tab === 'jobs') renderJobs(); }
   });
-  document.querySelectorAll('[data-retry]').forEach(el => el.addEventListener('click', () => action(async () => {
+  byId('retry-selected').onclick = () => runJobAction(async () => {
+    const ids = [...taskSelection].filter(id => status.queue.some((job: any) => job.id === id && job.can_bulk_resume));
+    if (!ids.length) return '所选任务中没有可重试项';
+    const result = await bridge.resume(ids); taskSelection.clear(); await refresh();
+    return `已重试 ${result.resumed} 项${result.skipped ? `，跳过 ${result.skipped} 项` : ''}`;
+  });
+  const deleteTasks = async (ids: string[]) => {
+    const deletable = ids.filter(id => status.queue.some((job: any) => job.id === id && canDeleteJob(job)));
+    if (!deletable.length) return '没有可删除任务；正在处理中的任务需要等待结束';
+    if (!confirm(`删除 ${deletable.length} 个任务？仅移除本插件的任务和未成功派生数据，不影响 Zotero 文献或 PDF。`)) return;
+    const result = await bridge.deleteJobs(deletable); taskSelection.clear(); await refresh();
+    return `已删除 ${result.deleted} 项${result.skipped ? `，跳过 ${result.skipped} 项处理中任务` : ''}`;
+  };
+  const rebuildTask = async (documentID: string) => {
+    if (!confirm('已检查 MinerU 原任务并确定需要重建？此操作可能重新上传 PDF 并消耗解析额度。')) return;
+    await bridge.reindex(documentID); await refresh(); return '已加入重建队列';
+  };
+  byId('delete-selected').onclick = () => runJobAction(() => deleteTasks([...taskSelection]));
+  byId('clear-task-selection').onclick = () => { taskSelection.clear(); taskSelectionAnchor = null; renderJobs(); };
+  byId('clear-completed').onclick = () => runJobAction(async () => {
+    const count = allJobs.filter((job: any) => ['done', 'skipped'].includes(job.state)).length;
+    if (!count) return '没有可清理的已完成任务';
+    if (!confirm(`清理 ${count} 个已完成任务记录？不会删除已入库文献、Zotero 条目或 PDF。`)) return;
+    const result = await bridge.clearCompletedJobs(); await refresh();
+    return `已清理 ${result.deleted} 个已完成任务`;
+  });
+  document.querySelectorAll('[data-delete-job]').forEach(el => el.addEventListener('click', () => runJobAction(() => deleteTasks([el.getAttribute('data-delete-job')!]))));
+  byId('task-context-retry').onclick = () => { byId('task-context-menu').hidden = true; byId('retry-selected').click(); };
+  byId('task-context-rebuild').onclick = () => {
+    byId('task-context-menu').hidden = true;
+    if (contextJob?.requires_rebuild) runJobAction(() => rebuildTask(contextJob.documentID));
+    else notify('该任务不需要重建；可使用重试或删除操作', true);
+  };
+  byId('task-context-delete').onclick = () => { byId('task-context-menu').hidden = true; runJobAction(() => deleteTasks([...taskSelection])); };
+  document.querySelectorAll('[data-retry]').forEach(el => el.addEventListener('click', () => runJobAction(async () => {
     const job = status.queue.find((j: any) => j.id === el.getAttribute('data-retry'));
     const resumingUpload = ['MINERU_UPLOAD_INCOMPLETE', 'MINERU_UPLOAD_CONFIRMATION_TIMEOUT'].includes(job?.error?.code);
     const result = await bridge.resume(el.getAttribute('data-retry')); await refresh();
     if (!result.resumed) return '任务状态已变化或不可重试，已刷新队列，请查看最新详情';
     return resumingUpload ? '已恢复查询原任务，不会重新上传 PDF' : '已重新排队；若再次失败会显示新的错误原因';
   })));
-  document.querySelectorAll('[data-rebuild]').forEach(el => el.addEventListener('click', () => action(async () => {
-    if (!confirm('已检查 MinerU 原任务并确定需要重建？此操作可能重新上传 PDF 并消耗解析额度。')) return;
-    await bridge.reindex(el.getAttribute('data-rebuild')); await refresh(); return '已加入重建队列';
+  document.querySelectorAll('[data-rebuild]').forEach(el => el.addEventListener('click', () => runJobAction(async () => {
+    return rebuildTask(el.getAttribute('data-rebuild')!);
   })));
+  if (jobActionPending) document.querySelectorAll('#jobs-content .task-actions button:not(#clear-task-selection), #jobs-content td button').forEach(el => (el as HTMLButtonElement).disabled = true);
+
 }
 function renderSettings() {
   // Drafts stay in this window's memory, including across status refreshes and tab changes.
@@ -385,7 +507,8 @@ async function init() {
     const lib = args.library;
     bridge = {
       status: () => lib.status(), list: () => lib.list(), enqueueSelected: () => lib.enqueueSelected(),
-      search: (a: any) => lib.search(a), read: (a: any) => lib.read(a), resume: (id?: string) => lib.resume('manual', id),
+      search: (a: any) => lib.search(a), read: (a: any) => lib.read(a), resume: (id?: string | string[]) => lib.resume('manual', id),
+      deleteJobs: (ids: string[]) => lib.deleteJobs(ids), clearCompletedJobs: () => lib.clearCompletedJobs(),
       saveSettings: (a: any) => lib.saveSettings(a), saveCredentials: async (a: any) => { await lib.credentials.save(a); if (!a.clear) await lib.resume('credentials'); },
       saveEmbeddingCredentials: (a: any) => lib.embeddingCredentials.save(a),
       reindex: async (id: string, force = true) => { const doc = await lib.store.document(id); return lib.enqueueItem(await lib.resolve(doc.libraryID, doc.itemKey), force); },

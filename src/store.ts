@@ -1,4 +1,5 @@
 import type { DocumentRecord, PublicError } from './core';
+import { canDeleteJob } from './queue';
 export interface Job {
   id: string; documentID: string; state: string; attempts: number; nextRun: number;
   batchID?: string; dataID?: string; pdfHash?: string; metadataHash?: string;
@@ -59,6 +60,22 @@ export class Store {
       await this.db.queryAsync('DELETE FROM documents WHERE id=?', [id]);
       await this.db.queryAsync('DELETE FROM document_summaries WHERE id=?', [id]);
       await this.db.queryAsync('DELETE FROM jobs WHERE document_id=?', [id]);
+    });
+  }
+  async deleteJob(id: string, documentID: string) {
+    return this.db.executeTransaction(async () => {
+      const raw = await this.db.valueQueryAsync('SELECT data FROM jobs WHERE id=? AND document_id=?', [id, documentID]);
+      if (!raw) return false;
+      const job = JSON.parse(raw) as Job;
+      if (!canDeleteJob(job)) return false;
+      const docRaw = await this.db.valueQueryAsync('SELECT data FROM documents WHERE id=?', [documentID]);
+      const doc = docRaw ? JSON.parse(docRaw) as DocumentRecord : null;
+      if (!doc?.indexedAt) {
+        await this.db.queryAsync('DELETE FROM documents WHERE id=?', [documentID]);
+        await this.db.queryAsync('DELETE FROM document_summaries WHERE id=?', [documentID]);
+      }
+      await this.db.queryAsync('DELETE FROM jobs WHERE id=? AND document_id=?', [id, documentID]);
+      return true;
     });
   }
   async jobs(): Promise<Job[]> {
