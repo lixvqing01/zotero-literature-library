@@ -7,6 +7,7 @@ This plugin is independently implemented. ZotSeek and other Zotero plugins are r
 - Lucide — ISC, with some Feather-derived icons under MIT. License is included. https://lucide.dev/license
 - parse5 — MIT. https://github.com/inikulin/parse5
 - entities — BSD-2-Clause. https://github.com/fb55/entities
+- MiniSearch 7.2.0 — MIT. BM25+ lexical search is bundled in the search Worker; no external runtime dependencies. https://github.com/lucaong/minisearch
 
 Build and test tools (esbuild, TypeScript, fflate, Playwright) are development dependencies; Node.js and these tools are not required by plugin users. The XPI archive is produced using fflate (MIT).
 

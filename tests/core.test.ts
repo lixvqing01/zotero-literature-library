@@ -158,9 +158,11 @@ test('task removal validates current stored state and preserves previously index
   const tasks = new Map(['new', 'indexed', 'busy', 'changed'].map(id => [id, { id, documentID: id, state: id === 'busy' || id === 'changed' ? 'running' : 'failed' }]));
   const docs = new Map(['new', 'indexed', 'busy', 'changed'].map(id => [id, { ...paper(id, id), ...(id === 'indexed' ? { indexedAt: '2026-01-01' } : {}) }]));
   const summaries = new Set(docs.keys());
+  let searchRevision = 0;
   store.db = {
     executeTransaction: async (fn: () => Promise<unknown>) => fn(),
     valueQueryAsync: async (sql: string, params: string[]) => {
+      if (sql.startsWith('SELECT value FROM settings')) return JSON.stringify(searchRevision);
       if (sql.startsWith('SELECT data FROM jobs')) {
         const job = tasks.get(params[0]);
         return job?.documentID === params[1] ? JSON.stringify(job) : null;
@@ -171,6 +173,8 @@ test('task removal validates current stored state and preserves previously index
       if (sql.startsWith('DELETE FROM documents ')) docs.delete(params[0]);
       else if (sql.startsWith('DELETE FROM document_summaries ')) summaries.delete(params[0]);
       else if (sql.startsWith('DELETE FROM jobs ')) tasks.delete(params[0]);
+      else if (/^DELETE FROM search_(blocks|vectors|documents)/.test(sql) || sql.startsWith('INSERT OR REPLACE INTO search_changes')) return;
+      else if (sql.startsWith('INSERT OR REPLACE INTO settings')) searchRevision = JSON.parse(params[1]);
       else throw Error('Unexpected query ' + sql);
     }
   };
@@ -359,7 +363,8 @@ test('interrupted uploads with an existing batch are reconciled without claiming
 
 test('missing vectors trigger an explicit fallback without downloading a model', async () => {
   const lib: any = Object.create(Library.prototype);
-  lib.store = { documents: async () => [paper('one', 'needle')] };
+  lib.store = { searchDocuments: async () => [{ ...paper('one', 'needle'), vectorLayers: [] }] };
+  lib.searchService = { search: async () => ({ results: [{ document_id: 'one' }], mode: 'keyword', timing_ms: {} }) };
   lib.modelFingerprint = () => 'fixture-model'; lib.settings = { model: 'qwen' };
   lib.inference = { embed: () => { throw Error('Should not load a model for an empty vector index'); } };
   const result = await lib.search({ query: 'needle', mode: 'hybrid' });

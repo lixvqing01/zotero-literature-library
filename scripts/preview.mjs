@@ -34,7 +34,7 @@ const server = createServer(async (req, res) => {
     const file = resolve(base, '.' + (path === '/' ? '/manager.xhtml' : path));
     if (!file.startsWith(base + sep)) { res.writeHead(403).end(); return; }
     const content = await readFile(file);
-    const mime = { '.xhtml': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
+    const mime = { '.html': 'text/html; charset=utf-8', '.xhtml': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
     res.setHeader('Content-Type', mime[extname(file)] || 'application/octet-stream'); res.end(content);
   } catch { res.writeHead(404).end(); }
 });

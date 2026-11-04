@@ -14,10 +14,13 @@ await build({ entryPoints: ['src/ui.ts'], bundle: true, outfile: `${out}/content
 await build({ entryPoints: ['src/inference-worker.ts'], bundle: true,
   define: { 'import.meta.url': 'self.location.href' },
   outfile: `${out}/content/inference-worker.js`, format: 'iife', platform: 'browser', target: 'firefox115' });
+await build({ entryPoints: ['src/search-worker.ts'], bundle: true, outfile: `${out}/content/search-worker.js`,
+  format: 'iife', platform: 'browser', target: 'firefox115' });
 await mkdir(`${out}/content/vendor`, { recursive: true });
 await mkdir(`${out}/licenses`, { recursive: true });
 for (const pkg of ['@huggingface/transformers', 'lucide', 'parse5', 'entities'])
   await cp(`node_modules/${pkg}/LICENSE`, `${out}/licenses/${pkg.replaceAll('/', '-')}.txt`);
+await cp('node_modules/minisearch/LICENSE.txt', `${out}/licenses/minisearch.txt`);
 await cp('THIRD_PARTY_NOTICES.md', `${out}/THIRD_PARTY_NOTICES.md`);
 const hf = 'node_modules/@huggingface/transformers/dist';
 await cp(`${hf}/transformers.web.js`, `${out}/content/vendor/transformers.web.js`);

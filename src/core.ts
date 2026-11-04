@@ -12,6 +12,20 @@ export interface Section {
   id: string; heading: string; level: number; kind: string;
   page: number | null; text: string;
 }
+export function normalizeYear(value: unknown): string {
+  return String(value ?? '').match(/(?:^|\D)((?:1[5-9]|20|21)\d{2})(?!\d)/)?.[1] || '';
+}
+export function sectionRole(heading: string): string {
+  const name = heading.replace(/^\s*(?:(?:[IVXLCDM]+|\d+(?:\.\d+)*|[A-Z])[.)：:\s-]+)\s*/i, '').trim();
+  if (/^(?:(?:references|bibliography|works cited|literature cited)\b|参考文献)/i.test(name)) return 'references';
+  if (/^(?:abstract\b|摘要)/i.test(name)) return 'abstract';
+  if (/^(?:.*\bmethods?\b|.*\bmaterials\b|实验方法|材料与方法|研究方法)/i.test(name)) return 'methods';
+  if (/^(?:results?\b|结果)/i.test(name)) return 'results';
+  if (/^(?:discussion\b|讨论)/i.test(name)) return 'discussion';
+  if (/^(?:conclusions?\b|结论)/i.test(name)) return 'conclusions';
+  if (/^(?:introduction\b|引言|绪论)/i.test(name)) return 'introduction';
+  return 'unknown';
+}
 export interface Chunk {
   id: string; sectionId: string; text: string; page: number | null;
   layer: Layer; vector?: number[];
@@ -119,7 +133,7 @@ export function parseDocument(markdown: string, contentList: any[] = []): { sect
   }
   const chunks: Chunk[] = [];
   for (const section of sections) {
-    section.kind = /^(?:(references|bibliography|works cited)\b|参考文献)/i.test(section.heading) ? 'references' : section.kind;
+    section.kind = sectionRole(section.heading) === 'references' ? 'references' : section.kind;
     for (const text of splitText(section.text)) chunks.push({ id: `c${chunks.length}`, sectionId: section.id,
       text, page: section.page, layer: 'fulltext' });
   }

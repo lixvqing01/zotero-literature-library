@@ -1,4 +1,4 @@
-import { boundedInt, cosine, keywordScore, type DocumentRecord, type Layer } from './core';
+import { boundedInt, cosine, keywordScore, sectionRole, type DocumentRecord, type Layer } from './core';
 
 export function metadataText(doc: DocumentRecord) {
   return [doc.title, doc.creators, doc.year, doc.publication, doc.doi, ...doc.tags,
@@ -7,7 +7,8 @@ export function metadataText(doc: DocumentRecord) {
 
 export function searchBlocks(doc: DocumentRecord, layer: string) {
   const blocks = doc.chunks.filter(c => (layer === 'auto' || c.layer === layer)
-    && doc.sections.find(s => s.id === c.sectionId)?.kind !== 'references');
+    && doc.sections.find(s => s.id === c.sectionId)?.kind !== 'references'
+    && sectionRole(doc.sections.find(s => s.id === c.sectionId)?.heading || '') !== 'references');
   if (['auto', 'metadata'].includes(layer) && !blocks.some(c => c.layer === 'metadata'))
     blocks.unshift({ id: 'metadata', sectionId: 'metadata', text: metadataText(doc), page: null, layer: 'metadata' });
   if (['auto', 'abstract'].includes(layer) && doc.abstract && !blocks.some(c => c.layer === 'abstract'))
@@ -59,17 +60,42 @@ export function rankDocuments(docs: DocumentRecord[], input: any, fingerprint: s
 export function readFulltext(doc: DocumentRecord, input: any) {
   if (input.page !== undefined && (!Number.isInteger(input.page) || input.page < 1)) throw Error('page 必须为从 1 开始的 PDF 页号。');
   if (input.offset !== undefined && (!Number.isSafeInteger(input.offset) || input.offset < 0)) throw Error('offset 必须为非负整数。');
-  const sections = doc.sections.filter(s => (!input.section_id || s.id === input.section_id)
+  const logical = logicalOutline(doc);
+  const logicalSections = logical.find(s => s.id === input.section_id)?.section_ids;
+  const sections = doc.sections.filter(s => (!input.section_id || s.id === input.section_id || logicalSections?.includes(s.id))
     && (input.page === undefined || s.page === input.page));
   const chunk = input.chunk_id ? doc.chunks.find(c => c.id === input.chunk_id && c.layer === 'fulltext'
     && sections.some(s => s.id === c.sectionId)) : null;
-  const matchedSections = input.chunk_id ? sections.filter(s => s.id === chunk?.sectionId) : sections;
-  const content = input.chunk_id ? chunk?.text || '' : sections.map(s => `## ${s.heading}\n${s.text}`).join('\n');
+  let matchedSections = input.chunk_id ? sections.filter(s => s.id === chunk?.sectionId) : sections;
+  let context = chunk ? [chunk] : [];
+  if (chunk && input.neighbors) {
+    const index = doc.chunks.indexOf(chunk), parent = logical.find(s => s.section_ids.includes(chunk.sectionId));
+    const count = boundedInt(input.neighbors, 1, 3);
+    context = doc.chunks.slice(Math.max(0, index - count), index + count + 1)
+      .filter(c => c.layer === 'fulltext' && parent?.section_ids.includes(c.sectionId));
+    matchedSections = doc.sections.filter(s => context.some(c => c.sectionId === s.id));
+  }
+  const content = input.chunk_id ? context.map(c => c.text).join('\n\n') : sections.map(s => `## ${s.heading}\n${s.text}`).join('\n');
   const offset = input.offset || 0, limit = boundedInt(input.max_chars, 12000, 60000);
   return { text: content.slice(offset, offset + limit), offset, total_chars: content.length,
     truncated: offset + limit < content.length, next_offset: offset + limit < content.length ? offset + limit : null,
     source: 'mineru', sections: matchedSections.map(s => ({ id: s.id, heading: s.heading, page: s.page })),
+    chunks: context.map(c => ({ id: c.id, section_id: c.sectionId, page: c.page })),
     pdf_link: matchedSections.length === 1 && matchedSections[0].page && doc.attachmentKey
       ? `zotero://open-pdf/${doc.libraryKey}/items/${doc.attachmentKey}?page=${matchedSections[0].page}` : null,
     missing: !doc.markdown, matched: matchedSections.length > 0 };
+}
+export function logicalOutline(doc: DocumentRecord) {
+  const result: { id: string; heading: string; level: number; kind: string; role: string; page: number | null; pages: number[]; section_ids: string[]; chars: number }[] = [];
+  for (const section of doc.sections) {
+    let parent = result[result.length - 1];
+    if (!parent || parent.heading !== section.heading || parent.level !== section.level) {
+      parent = { id: `logical:${section.id}`, heading: section.heading, level: section.level, kind: sectionRole(section.heading) === 'references' ? 'references' : section.kind,
+        role: section.kind === 'references' ? 'references' : sectionRole(section.heading), page: section.page, pages: [], section_ids: [], chars: 0 };
+      result.push(parent);
+    }
+    parent.section_ids.push(section.id); parent.chars += section.text.length;
+    if (section.page !== null && !parent.pages.includes(section.page)) parent.pages.push(section.page);
+  }
+  return result;
 }

@@ -95,3 +95,9 @@ button:disabled { opacity:.45; cursor:default; }
 .context-menu button:hover { background:#edf4ed; }
 @media(max-width:700px) { .library-sort { justify-content:flex-start; }.library-sort select { width:130px; }.task-actions { justify-content:flex-start; }.task-actions button { flex:1 1 130px; }.job-search { flex-wrap:wrap; }.job-search input { flex:1 1 100%; } }
 @media(max-width:700px) { .setup-tabs{gap:4px}.setup-tabs button{padding:9px 7px;font-size:10px}.setup-card{padding:17px 14px}.agent-card{align-items:flex-start;flex-direction:column}.agent-card button{width:100%}.provider-choice{padding-left:0;padding-right:0}.tooltip{left:auto;right:-4px;top:23px}.setup-footer{flex-direction:column} }
+.research-layout { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr); gap: 20px; align-items: start; }
+.research-entry { border-bottom: 1px solid var(--border, #e3e8ee); padding: 14px 0; overflow-wrap: anywhere; }
+.research-entry p { white-space: pre-wrap; line-height: 1.6; }
+.research-workspace { margin: 18px 0; }
+.research-pagination { display: flex; gap: 10px; margin: 12px 0 24px; }
+@media (max-width: 960px) { .research-layout { grid-template-columns: minmax(0, 1fr); } }

@@ -31,6 +31,8 @@ let contextJob: any = null;
 let librarySortKey: DocumentSortKey | 'relevance' = 'title';
 let librarySortDirection: 'asc' | 'desc' = 'asc';
 let taskSelectionAnchor: string | null = null;
+let researchSerial = 0;
+let researchWorkspace = '', researchTheme = '', researchOffset = 0, researchEvidenceOffset = 0;
 const LIBRARY_PAGE_SIZE = 50;
 const settingDrafts: Record<string, string> = {};
 function rememberSettings() {
@@ -50,7 +52,7 @@ const icon = (name: string, size = 17) => `<i data-lucide="${name}" width="${siz
 const button = (id: string, name: string, title: string, primary = false) => `<button type="button" id="${id}" class="${primary ? 'primary' : ''}" title="${text(title)}">${icon(name)}<span>${text(title)}</span></button>`;
 function layout() {
   setMarkup(app, `<aside class="sidebar"><div class="brand">${icon('library-big', 25)}<div>Literature<span>LIBRARY</span></div></div>
-    <nav><button data-tab="library">${icon('library')}文献库<span id="nav-count"></span></button><button data-tab="jobs">${icon('list-checks')}任务队列<span id="job-count"></span></button><button data-tab="settings">${icon('settings-2')}设置</button></nav>
+    <nav><button data-tab="library">${icon('library')}文献库<span id="nav-count"></span></button><button data-tab="jobs">${icon('list-checks')}任务队列<span id="job-count"></span></button><button data-tab="research">${icon('notebook-tabs')}调研主题</button><button data-tab="settings">${icon('settings-2')}设置</button></nav>
     <div class="sidebar-bottom"><span class="status-dot"></span>Zotero 本地知识库<div id="sidebar-model">Qwen · ONNX</div></div></aside>
     <main><header><div><div class="eyebrow">RESEARCH WORKSPACE</div><h1 id="view-title">文献库</h1></div><div class="header-actions">${button('refresh', 'refresh-cw', '刷新')}${button('add-selected', 'plus', '加入 Zotero 所选条目', true)}</div></header>
     <div id="notification" role="status" hidden="hidden"></div><div id="credential-warning" hidden="hidden"></div>
@@ -62,7 +64,7 @@ function layout() {
   document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTaskMenu(); });
   window.addEventListener('resize', hideTaskMenu);
   window.addEventListener('scroll', hideTaskMenu, true);
-  byId('refresh').onclick = () => refresh();
+  byId('refresh').onclick = () => { if (tab === 'research') renderedViewKey = ''; return refresh(); };
   byId('add-selected').onclick = () => action(async () => {
     const jobs = await bridge.enqueueSelected(); await refresh(); return `${jobs.length} 个任务已加入队列`;
   });
@@ -102,7 +104,7 @@ async function refresh() {
 function render() {
   if (!status) return;
   document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('active', el.getAttribute('data-tab') === tab));
-  byId('view-title').textContent = { library: '文献库', jobs: '任务队列', settings: '设置' }[tab];
+  byId('view-title').textContent = { library: '文献库', jobs: '任务队列', research: '调研主题', settings: '设置' }[tab];
   byId('nav-count').textContent = documents.length;
   const waiting = status.queue.filter((j: any) => !['done', 'skipped'].includes(j.state)).length;
   byId('job-count').textContent = waiting || '';
@@ -122,16 +124,57 @@ function render() {
     ['library', '文献条目', cov.documents], ['file-text', '摘要', cov.abstracts],
     ['file-check-2', '全文已提取', cov.fulltext], ['network', '当前模型已索引', cov.vectors]
   ].map(([symbol, label, value]) => `<div class="metric">${icon(String(symbol), 19)}<div><span>${label}</span><strong>${value}</strong></div><div class="coverage"><b style="width:${cov.documents ? Number(value) / cov.documents * 100 : 0}%"></b></div></div>`).join(''));
-  const viewKey = JSON.stringify(tab === 'library' ? [tab, documents] : tab === 'jobs' ? [tab, status.queue] : [tab, settingsPane, status.settings, status.credentials, status.model, status.embedding_credentials, status.agents]);
+  const viewKey = JSON.stringify(tab === 'library' ? [tab, documents] : tab === 'jobs' ? [tab, status.queue] : tab === 'research' ? [tab, status.research_revision] : [tab, settingsPane, status.settings, status.credentials, status.model, status.embedding_credentials, status.agents]);
   if (viewKey !== renderedViewKey) {
     renderedViewKey = viewKey;
-    if (tab === 'library') renderLibrary(); else if (tab === 'jobs') renderJobs(); else renderSettings();
+    if (tab === 'library') renderLibrary(); else if (tab === 'jobs') renderJobs(); else if (tab === 'research') void renderResearch(); else renderSettings();
   }
   createIcons({ icons, attrs: { 'stroke-width': 1.7 } });
 }
+async function renderResearch() {
+  const serial = ++researchSerial;
+  setMarkup(byId('view'), '<div class="setup-card">正在读取调研工作区…</div>');
+  try {
+    const list = await bridge.workspace({ action: 'list', limit: 100 });
+    let detail: any;
+    if (researchWorkspace && researchTheme) detail = await bridge.workspace({ action: 'get', workspace_id: researchWorkspace,
+      theme_id: researchTheme, offset: researchOffset, evidence_offset: researchEvidenceOffset, limit: 20 });
+    if (serial !== researchSerial || tab !== 'research') return;
+    const statuses: Record<string, string> = { unreviewed: '待筛选', included: '已纳入', excluded: '已排除', uncertain: '待核查' };
+    setMarkup(byId('view'), `<div class="research-layout"><section class="setup-card"><div class="section-title"><h2>调研工作区</h2>${button('research-refresh', 'refresh-cw', '刷新主题')}</div>
+      <p class="small-note">Agent 按主题保存候选文献、筛选理由和证据。这里的记录独立于 Zotero 集合与标签。</p>
+      ${list.workspaces.length ? list.workspaces.map((w: any) => `<div class="research-workspace"><h3>${text(w.title)}</h3>${w.themes.map((t: any) => `<button class="section-link ${researchWorkspace === w.id && researchTheme === t.id ? 'active' : ''}" data-workspace="${text(w.id)}" data-theme="${text(t.id)}"><span>${text(t.title)}</span><span>${t.candidates} 篇 · ${t.evidence} 条证据</span></button>`).join('') || '<p class="small-note">尚未创建主题</p>'}</div>`).join('') : '<p>还没有调研工作区。让 Agent 使用 literature_workspace 创建主题，读取摘要并保存筛选结果。</p>'}
+      ${list.next_offset !== null ? '<p class="small-note">仅展示前 100 个工作区；其余可通过 MCP 分页读取。</p>' : ''}</section>
+      <section class="setup-card">${detail ? `<h2>${text(detail.title)}</h2><h3>候选文献 · ${detail.total}</h3>
+        ${detail.candidates.map((c: any) => `<article class="research-entry"><button class="title-button" data-research-document="${text(c.document_id)}">${text(c.title || c.document_id)}</button><div class="small-note">${text(statuses[c.status] || c.status)}${c.changed ? ' · 来源版本已变化，需重新核对' : ''}${c.missing ? ' · 来源已移除' : ''}</div><p>${text(c.reason || '尚未记录筛选理由')}</p></article>`).join('') || '<p class="small-note">尚无候选文献</p>'}
+        <div class="research-pagination"><button id="research-prev" ${researchOffset === 0 ? 'disabled="disabled"' : ''}>上一页文献</button><button id="research-next" ${detail.next_offset === null ? 'disabled="disabled"' : ''}>下一页文献</button></div>
+        <h3>证据 · ${detail.evidence_total}</h3>${detail.evidence.map((e: any) => `<article class="research-entry"><strong>${text(e.claim)}</strong><div class="small-note">Agent 判断：${text(({ supports: '支持', contradicts: '反驳', limits: '限制', context: '背景', uncertain: '待核查' } as any)[e.stance])} · ${e.page ? `PDF ${e.page} 页` : '页码未知'}${e.changed ? ' · 来源版本已变化' : ''}${e.missing ? ' · 来源已移除' : ''}</div><p>${text(e.excerpt)}</p><button data-evidence-document="${text(e.document_id)}" data-evidence-chunk="${text(e.chunk_id)}">读取原始证据</button></article>`).join('') || '<p class="small-note">尚无已保存证据</p>'}
+        <div class="research-pagination"><button id="evidence-prev" ${researchEvidenceOffset === 0 ? 'disabled="disabled"' : ''}>上一页证据</button><button id="evidence-next" ${detail.next_evidence_offset === null ? 'disabled="disabled"' : ''}>下一页证据</button></div>
+        <h3>最近查询</h3>${detail.queries.map((q: any) => `<div class="small-note">${text(q.query)} · ${text(q.layer)} · 返回 ${q.returned} 条</div>`).join('') || '<p class="small-note">暂无查询轨迹</p>'}` : '<h2>摘要 → 候选 → 正文证据</h2><p>选择左侧主题，查看 Agent 的筛选结果、原始证据和查询轨迹。</p>'}</section></div>`);
+    byId('research-refresh').onclick = () => { void renderResearch(); };
+    document.querySelectorAll('[data-workspace]').forEach(el => el.addEventListener('click', () => {
+      researchWorkspace = el.getAttribute('data-workspace')!; researchTheme = el.getAttribute('data-theme')!;
+      researchOffset = 0; researchEvidenceOffset = 0; void renderResearch();
+    }));
+    document.querySelectorAll('[data-research-document]').forEach(el => el.addEventListener('click', () => {
+      selected = el.getAttribute('data-research-document'); selectedLayer = 'abstract'; detailOffset = 0; detailFilter = {}; void showDetail();
+    }));
+    document.querySelectorAll('[data-evidence-document]').forEach(el => el.addEventListener('click', () => {
+      selected = el.getAttribute('data-evidence-document'); selectedLayer = 'fulltext'; detailOffset = 0;
+      detailFilter = { chunk_id: el.getAttribute('data-evidence-chunk'), neighbors: 1 }; void showDetail();
+    }));
+    if (detail) {
+      byId('research-prev').onclick = () => { researchOffset = Math.max(0, researchOffset - 20); void renderResearch(); };
+      byId('research-next').onclick = () => { researchOffset = detail.next_offset; void renderResearch(); };
+      byId('evidence-prev').onclick = () => { researchEvidenceOffset = Math.max(0, researchEvidenceOffset - 20); void renderResearch(); };
+      byId('evidence-next').onclick = () => { researchEvidenceOffset = detail.next_evidence_offset; void renderResearch(); };
+    }
+    createIcons({ icons });
+  } catch (error: any) { if (serial === researchSerial && tab === 'research') setMarkup(byId('view'), `<div class="setup-card">${text(error.message)}<button id="research-retry">重新读取</button></div>`); byId('research-retry')?.addEventListener('click', () => { researchWorkspace = ''; researchTheme = ''; void renderResearch(); }); }
+}
 function renderLibrary() {
   const view = byId('view');
-  if (!byId('search-form')) setMarkup(view, `<div class="toolbar"><form id="search-form"><div class="search-input">${icon('search')}<input id="search-query" aria-label="搜索文献" placeholder="搜索标题、作者、关键词或正文…" value="${text(searchState.query)}"/></div><select id="search-layer" aria-label="检索层"><option value="auto">所有层级</option><option value="metadata">书目</option><option value="abstract">摘要</option><option value="fulltext">全文</option></select><select id="search-mode" aria-label="检索模式"><option value="keyword">关键词</option><option value="hybrid">混合检索</option><option value="semantic">向量检索</option></select><button type="submit" class="primary" title="搜索">${icon('search')}搜索</button>${button('clear-search', 'x', '清除搜索')}</form><div class="selection-actions">${button('reindex-selected', 'rotate-cw', '更新索引')}${button('remove-selected', 'trash-2', '移除')}</div></div>
+  if (!byId('search-form')) setMarkup(view, `<div class="toolbar"><form id="search-form"><div class="search-input">${icon('search')}<input id="search-query" aria-label="搜索文献" placeholder="先搜标题、作者和摘要；查证据请选择全文…" value="${text(searchState.query)}"/></div><select id="search-layer" aria-label="检索层"><option value="auto">书目与摘要（默认）</option><option value="metadata">书目</option><option value="abstract">摘要</option><option value="fulltext">全文</option></select><select id="search-mode" aria-label="检索模式"><option value="keyword">关键词</option><option value="hybrid">混合检索</option><option value="semantic">向量检索</option></select><button type="submit" class="primary" title="搜索">${icon('search')}搜索</button>${button('clear-search', 'x', '清除搜索')}</form><div class="selection-actions">${button('reindex-selected', 'rotate-cw', '更新索引')}${button('remove-selected', 'trash-2', '移除')}</div></div>
     <div class="library-sort"><label>排序<select id="library-sort"><option value="relevance">检索相关度</option><option value="title">标题</option><option value="creators">作者</option><option value="year">年份</option><option value="publication">期刊</option><option value="state">状态</option></select></label>${button('library-sort-direction', 'arrow-down-wide-narrow', '升序')}</div><div class="table-wrap"><table><thead><tr><th class="check-col"><input id="select-all" type="checkbox" aria-label="选择本页全部文献"/></th><th>文献</th><th class="year-col">年份</th><th>覆盖层级</th><th>状态</th><th class="end-col"></th></tr></thead><tbody id="document-rows"></tbody></table></div><div id="library-empty" class="empty" ${documents.length ? 'hidden="hidden"' : ''}>${icon('library', 40)}<h2>文献库为空</h2><button id="empty-add" class="primary">${icon('plus')}加入 Zotero 所选条目</button></div><div id="search-notice" class="small-note"></div>`);
   byId('search-layer').value = searchState.layer; byId('search-mode').value = searchState.mode;
   if (byId('search-query').value !== searchState.query) byId('search-query').value = searchState.query;
@@ -507,7 +550,7 @@ async function init() {
     const lib = args.library;
     bridge = {
       status: () => lib.status(), list: () => lib.list(), enqueueSelected: () => lib.enqueueSelected(),
-      search: (a: any) => lib.search(a), read: (a: any) => lib.read(a), resume: (id?: string | string[]) => lib.resume('manual', id),
+      workspace: (a: any) => lib.workspace(a), search: (a: any) => lib.search(a), read: (a: any) => lib.read(a), resume: (id?: string | string[]) => lib.resume('manual', id),
       deleteJobs: (ids: string[]) => lib.deleteJobs(ids), clearCompletedJobs: () => lib.clearCompletedJobs(),
       saveSettings: (a: any) => lib.saveSettings(a), saveCredentials: async (a: any) => { await lib.credentials.save(a); if (!a.clear) await lib.resume('credentials'); },
       saveEmbeddingCredentials: (a: any) => lib.embeddingCredentials.save(a),

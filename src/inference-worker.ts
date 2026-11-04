@@ -1,6 +1,7 @@
 // The browser build is bundled with the XPI; no Node runtime or model service is used.
 import { env, pipeline } from '@huggingface/transformers';
 import { MODELS, MODEL_SOURCES } from './models';
+import { PriorityQueue } from './priority-queue';
 env.allowRemoteModels = true;
 env.allowLocalModels = false;
 // Gecko's CacheStorage is unsafe in a system-principal Worker. Persist through
@@ -25,12 +26,12 @@ wasm.numThreads = 1;
 wasm.proxy = false;
 let extractor: any;
 let active = '';
-let chain = Promise.resolve();
+const workQueue = new PriorityQueue();
 self.onmessage = ({ data }) => {
   if (data.cacheID && data.cacheResult !== undefined) {
     cacheRequests.get(data.cacheID)?.(data.cacheResult); cacheRequests.delete(data.cacheID); return;
   }
-  chain = chain.then(async () => {
+  workQueue.enqueue(async () => {
     const { id, model, texts, query, modelSource = 'modelscope' } = data;
     try {
       const spec = MODELS[model as keyof typeof MODELS];
@@ -67,5 +68,5 @@ self.onmessage = ({ data }) => {
       }
       self.postMessage({ id, vectors, model });
     } catch (error) { self.postMessage({ id, error: error instanceof Error ? error.message : '向量推理失败。' }); }
-  });
+  }, !!data.query);
 };

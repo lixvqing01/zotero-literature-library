@@ -1,4 +1,4 @@
-import { AppError, boundedInt, publicError,
+import { AppError, boundedInt, publicError, normalizeYear,
   type DocumentRecord, type Layer } from './core';
 import { Credentials, EmbeddingCredentials } from './credentials';
 import { EmbeddingAPI, embeddingURL } from './embedding-api';
@@ -8,7 +8,11 @@ import { Inference } from './inference';
 import { Store, type Job } from './store';
 import { modelFingerprint, type ModelSource } from './models';
 import { CitationBridge } from './citation-bridge';
-import { metadataText, rankDocuments, readFulltext, searchBlocks } from './retrieval';
+import { metadataText, readFulltext, logicalOutline } from './retrieval';
+import { SearchService, SearchTransport } from './search-service';
+import { matchesScope } from './search-engine';
+import { validateSearch } from './search-input';
+import { ResearchWorkspaces } from './research';
 import { ACTIVE, canResume, canBulkResume, canDeleteJob, retryExclusion, resumedJob, requiresRebuild, displayJobState, isLibraryDocument, UPLOAD_CONFIRMATION_TIMEOUT, type ResumeReason } from './queue';
 import { AgentInstaller } from './agent-installer';
 
@@ -37,6 +41,11 @@ export class Library {
   private enqueueChain: Promise<any> = Promise.resolve();
   private transfers = new Set<any>();
   private lastEmbeddingCheck: any;
+  private searchService?: SearchService;
+  private researchService?: ResearchWorkspaces;
+  private queryVectors = new Map<string, Promise<number[]>>();
+  private researchRevision = 0;
+  private get research() { return this.researchService ||= new ResearchWorkspaces(this.store); }
   private async remoteFetch(url: string, options: any = {}) {
     const controller = new this.win.AbortController(); this.transfers.add(controller);
     const timer = this.win.setTimeout(() => controller.abort(), 120000);
@@ -165,7 +174,7 @@ export class Library {
     const creators = item.getCreators().map((c: any) => c.name || [c.firstName, c.lastName].filter(Boolean).join(' ')).join(', ');
     const doc: DocumentRecord = { id: `${item.libraryID}:${item.key}:${attachment?.key || 'metadata'}`,
       libraryID: item.libraryID, libraryKey, itemKey: item.key, attachmentKey: attachment?.key || null,
-      title: item.getField('title') || 'Untitled', creators, year: String(item.getField('date') || '').slice(0, 4),
+      title: item.getField('title') || 'Untitled', creators, year: normalizeYear(Zotero.Date?.strToDate?.(String(item.getField('date') || ''))?.year || item.getField('date')),
       publication: item.getField('publicationTitle') || '', doi: item.getField('DOI') || '',
       abstract: item.getField('abstractNote') || '', tags: item.getTags().map((t: any) => t.tag),
       collections: item.getCollections().map((id: number) => Zotero.Collections.get(id)?.key).filter(Boolean),
@@ -489,6 +498,7 @@ export class Library {
         retry_exclusion: retryExclusion(job) || (!summaryByDocument.get(job.documentID)?.attachmentKey ? '无 PDF 附件' : null),
         requires_rebuild: requiresRebuild(job) })),
       agents: await this.agentInstaller.status(), local_only: false, parsing_provider: 'mineru',
+      research_revision: this.researchRevision,
       endpoint: `http://127.0.0.1:${Zotero.Prefs.get('httpServer.port') || 23119}/literature-library/mcp` };
   }
   async list() {
@@ -499,18 +509,38 @@ export class Library {
       hasCurrentVectors: doc.modelFingerprint === this.modelFingerprint() && doc.hasVectors }));
   }
   async read(input: any) {
+    if (input.document_ids !== undefined) return this.readBatch(input);
+    if (['metadata', 'abstract'].includes(input.layer || 'metadata')) {
+      const doc = await this.store.searchDocument(String(input.document_id));
+      if (!doc) throw Error('未找到文献，请提供 document_id。');
+      const base = { document_id: doc.id, item_key: doc.itemKey, title: doc.title, state: doc.state, version: doc.version,
+        link: `zotero://select/${doc.libraryKey}/items/${doc.itemKey}` };
+      const limit = boundedInt(input.max_chars, 12000, 60000);
+      if ((input.layer || 'metadata') === 'metadata') return { ...base, metadata: { creators: doc.creators, year: doc.year,
+        publication: doc.publication, doi: doc.doi, ...doc.bibliographic, tags: doc.tags, collections: doc.collections },
+        available_layers: ['metadata', ...(doc.abstract ? ['abstract'] : []), ...(doc.hasFulltext ? ['outline', 'fulltext'] : [])], source: 'zotero' };
+      const offset = input.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw Error('offset 必须为非负整数。');
+      return { ...base, text: doc.abstract.slice(offset, offset + limit), source: 'zotero.abstractNote', missing: !doc.abstract,
+        offset, total_chars: doc.abstract.length, truncated: offset + limit < doc.abstract.length,
+        next_offset: offset + limit < doc.abstract.length ? offset + limit : null };
+    }
     const doc = await this.store.document(String(input.document_id));
     if (!doc) throw new Error('未找到已入库文献，请提供 document_id。');
-    const layer: Layer = input.layer || 'metadata';
+    const layer: Layer = input.layer;
     const base = { document_id: doc.id, item_key: doc.itemKey, title: doc.title, state: doc.state,
       link: `zotero://select/${doc.libraryKey}/items/${doc.itemKey}` };
     const limit = boundedInt(input.max_chars, 12000, 60000);
-    if (layer === 'metadata') return { ...base, metadata: { creators: doc.creators, year: doc.year,
-      publication: doc.publication, doi: doc.doi, ...doc.bibliographic, tags: doc.tags, collections: doc.collections },
-      available_layers: ['metadata', ...(doc.abstract ? ['abstract'] : []), ...(doc.markdown ? ['outline', 'fulltext'] : [])] };
-    if (layer === 'abstract') return { ...base, text: doc.abstract.slice(0, limit), source: 'zotero.abstractNote',
-      missing: !doc.abstract, truncated: doc.abstract.length > limit };
-    if (layer === 'outline') return { ...base, sections: doc.sections.map(({ text, ...s }) => ({ ...s, chars: text.length })) };
+    const version = (await this.store.searchDocument(doc.id))?.version;
+    if (layer === 'outline') {
+      const sections = logicalOutline(doc), offset = input.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw Error('offset 必须为非负整数。');
+      const output = []; let chars = 0;
+      for (const section of sections.slice(offset)) { const size = JSON.stringify(section).length; if (chars + size > limit) break; output.push(section); chars += size; }
+      if (!output.length && offset < sections.length) throw new AppError({ code: 'READ_BUDGET_TOO_SMALL', message: '目录条目超过字符预算，请增大 max_chars。', retryable: false });
+      return { ...base, version, sections: output, total_sections: sections.length, offset,
+        next_offset: offset + output.length < sections.length ? offset + output.length : null, truncated: offset + output.length < sections.length };
+    }
     if (layer === 'notes') {
       const item = await this.resolve(doc.libraryID, doc.itemKey);
       const notes = item.getNotes ? await Zotero.Items.getAsync(item.getNotes()) : [];
@@ -525,29 +555,119 @@ export class Library {
       return { ...base, notes: texts, truncated };
     }
     if (layer !== 'fulltext') throw new Error('不支持的 layer。');
-    return { ...base, ...readFulltext(doc, input) };
+    if (input.neighbors !== undefined && (!Number.isInteger(input.neighbors) || input.neighbors < 0 || input.neighbors > 3)) throw Error('neighbors 范围为 0–3。');
+    return { ...base, version, ...readFulltext(doc, input) };
   }
   async search(input: any) {
-    const query = String(input.query || '').trim();
-    if (!query || query.length > 4000) throw new Error('query 长度必须为 1–4000 字符。');
-    const layer = input.layer || 'auto';
-    if (!['auto', 'metadata', 'abstract', 'fulltext'].includes(layer)) throw new Error('无效检索层。');
-    if (input.mode && !['keyword', 'hybrid', 'semantic'].includes(input.mode)) throw new Error('无效检索模式。');
-    const docs = (await this.store.documents()).filter(d => (!input.library_id || d.libraryID === input.library_id)
-      && (!input.year || d.year === String(input.year)) && (!input.publication || d.publication.toLowerCase().includes(String(input.publication).toLowerCase())));
-    let vector: number[] | undefined, semanticError: any;
-    const indexed = docs.filter(d => d.modelFingerprint === this.modelFingerprint() && searchBlocks(d, layer).some(c => c.vector?.length));
-    if (input.mode === 'semantic' || input.mode === 'hybrid') {
-      try {
-        if (docs.length && !indexed.length) throw new AppError({ code: 'INDEX_VECTORS_MISSING',
-          message: '当前检索层没有与所选模型匹配的向量，请启用向量化并重新入库。', retryable: false, requires_user_action: true });
-        if (docs.length) vector = (await this.embedTexts([query], true))[0];
+    if (!input || typeof input !== 'object') throw Error('无效检索参数。');
+    if (input.queries !== undefined) {
+      if (!Array.isArray(input.queries) || !input.queries.length || input.queries.length > 8) throw Error('每批支持 1–8 条查询。');
+      if (input.max_chars !== undefined && (!Number.isInteger(input.max_chars) || input.max_chars < 2000 * input.queries.length || input.max_chars > 60000)) throw Error('批次 max_chars 至少每条查询 2000，合计最多 60000。');
+      const { queries, ...common } = input, budget = Math.floor((input.max_chars || 60000) / queries.length), results = [];
+      for (let i = 0; i < queries.length; i++) {
+        const query = queries[i];
+        try {
+          if (!query || typeof query !== 'object' || Array.isArray(query) || query.queries !== undefined) throw Error('批次子查询必须为对象。');
+          results.push({ query_id: query.query_id || `q${i + 1}`, theme_id: query.theme_id || null,
+            ...await this.searchOne({ ...common, ...query, max_chars: Math.min(query.max_chars || budget, budget) }) });
+        } catch (error) { results.push({ query_id: query?.query_id || `q${i + 1}`, theme_id: query?.theme_id || null, error: publicError(error), results: [] }); }
       }
-      catch (error) { semanticError = publicError(error); if (input.mode === 'semantic') throw error; }
+      return { queries: results, partial: results.some(r => r.error), scope: 'plugin_derived_library' };
     }
-    return { results: rankDocuments(docs, { ...input, query, layer }, this.modelFingerprint(), vector),
-      mode: vector ? input.mode : input.mode === 'semantic' && !docs.length ? 'semantic' : 'keyword',
-      warning: semanticError, coverage: { candidates: docs.length, indexed: indexed.length }, active_model: this.modelFingerprint() };
+    return this.searchOne(input);
+  }
+  private async searchOne(raw: any) {
+    const started = Date.now();
+    const input = validateSearch(raw);
+    input.scope = await this.research.scope(input.scope);
+    const docs = (await this.store.searchDocuments()).filter(d => matchesScope(d, input));
+    const fingerprint = this.modelFingerprint();
+    const indexed = docs.filter(d => d.modelFingerprint === fingerprint && d.vectorLayers.some(l => input.layer === 'auto' ? ['metadata', 'abstract'].includes(l) : l === input.layer));
+    let vector: number[] | undefined, warning: any;
+    const inferStarted = Date.now();
+    if (input.mode === 'semantic' || input.mode === 'hybrid') try {
+      if (docs.length && !indexed.length) throw new AppError({ code: 'INDEX_VECTORS_MISSING',
+        message: '当前检索层没有与所选模型匹配的向量，请启用向量化并重新入库。', retryable: false, requires_user_action: true });
+      if (docs.length) {
+        this.queryVectors ||= new Map();
+        const key = JSON.stringify([fingerprint, input.query]);
+        let pending = this.queryVectors.get(key);
+        if (!pending) {
+          pending = this.embedTexts([input.query], true).then(values => values[0]);
+          this.queryVectors.set(key, pending);
+          if (this.queryVectors.size > 64) this.queryVectors.delete(this.queryVectors.keys().next().value!);
+          pending.catch(() => this.queryVectors.delete(key));
+        }
+        vector = await pending;
+        if (fingerprint !== this.modelFingerprint()) throw new AppError({ code: 'MODEL_CHANGED', message: '查询期间模型配置已变化，请重试。', retryable: true });
+      }
+    } catch (error) { warning = publicError(error); if (input.mode === 'semantic') throw error; }
+    const inferenceTime = Date.now() - inferStarted;
+    this.searchService ||= new SearchService(this.store, new SearchTransport(this.win));
+    const result = await this.searchService.search(input, fingerprint, vector);
+    if (input.scope.workspace_id) {
+      await this.research.trace(input.scope.workspace_id, input.scope.theme_id, {
+        query: input.query, layer: input.layer, filters: input.filters || {}, snapshot: result.snapshot, time: new Date().toISOString(),
+        returned: result.results.length, document_ids: result.results.map((r: any) => r.document_id), query_id: input.query_id || null });
+      this.researchRevision++; this.changed();
+    }
+    return { ...result, warning, timing_ms: { ...result.timing_ms, inference_and_queue: inferenceTime, total: Date.now() - started } };
+  }
+  async workspace(input: any) {
+    if (!input || !['create', 'list', 'get', 'upsert_theme', 'update_candidates', 'save_evidence', 'remove_evidence', 'delete'].includes(input.action)) throw Error('无效工作区操作。');
+    if (input.max_chars !== undefined && (!Number.isInteger(input.max_chars) || input.max_chars < 10000 || input.max_chars > 60000)) throw Error('max_chars 范围为 10000–60000。');
+    const result = await this.research.call(input);
+    if (!['get', 'list'].includes(input.action)) { this.researchRevision++; this.changed(); }
+    return result;
+  }
+  private async readBatch(input: any) {
+    if (input.document_id !== undefined) throw Error('document_id 与 document_ids 不能同时使用。');
+    if (!Array.isArray(input.document_ids) || !input.document_ids.length || input.document_ids.length > 20
+      || input.document_ids.some((id: any) => typeof id !== 'string' || id.length > 200)) throw Error('批量读取支持 1–20 篇文献。');
+    if (!['metadata', 'abstract', 'outline'].includes(input.layer || 'abstract')) throw Error('批读支持书目、摘要或目录；正文请按片段读取。');
+    if (input.max_chars !== undefined && (!Number.isInteger(input.max_chars) || input.max_chars < 2000 || input.max_chars > 60000)) throw Error('max_chars 范围为 2000–60000。');
+    const budget = boundedInt(input.max_chars, 24000, 60000), ids = [...new Set<string>(input.document_ids)], results: any[] = [];
+    let used = 0;
+    for (const id of ids) {
+      if (budget - used < 1000) break;
+      let result;
+      try { result = await this.read({ document_id: id, layer: input.layer || 'abstract', offset: input.offset,
+        max_chars: Math.max(1, Math.min(6000, budget - used - 900)) }); }
+      catch (error) { result = { document_id: id, error: publicError(error) }; }
+      const size = JSON.stringify(result).length; if (used + size > budget) break;
+      results.push(result); used += size;
+    }
+    return { results, used_chars: used, truncated: results.length < ids.length || results.some(r => r.truncated),
+      remaining_document_ids: ids.slice(results.length), content_is_untrusted: true };
+  }
+  async agentStatus(input: any = {}) {
+    const [docs, jobs] = await Promise.all([this.store.searchDocuments(), this.store.jobs()]);
+    if (input.view === 'jobs') {
+      if (input.offset !== undefined && (!Number.isSafeInteger(input.offset) || input.offset < 0)) throw Error('无效 offset。');
+      const sorted = jobs.filter(j => !input.state || j.state === input.state).sort((a, b) => a.id.localeCompare(b.id));
+      const offset = input.offset || 0, limit = boundedInt(input.limit, 20, 100);
+      const titles = new Map(docs.map(d => [d.id, d.title]));
+      return { jobs: sorted.slice(offset, offset + limit).map(j => ({ id: j.id, document_id: j.documentID, title: titles.get(j.documentID),
+        state: j.state, attempts: j.attempts, error: j.error, can_bulk_resume: canBulkResume(j) })),
+        total: sorted.length, next_offset: offset + limit < sorted.length ? offset + limit : null };
+    }
+    if (input.view && input.view !== 'overview') throw Error('无效 view。');
+    const states: Record<string, number> = {};
+    for (const job of jobs) states[job.state] = (states[job.state] || 0) + 1;
+    const collections = new Map<string, number>(), tags = new Map<string, number>();
+    for (const doc of docs) {
+      for (const key of doc.collections) collections.set(`${doc.libraryID}:${key}`, (collections.get(`${doc.libraryID}:${key}`) || 0) + 1);
+      for (const tag of doc.tags) tags.set(tag, (tags.get(tag) || 0) + 1);
+    }
+    const tasks = new Map(jobs.map(j => [j.documentID, j])), libraryDocs = docs.filter(d => isLibraryDocument(d, tasks.get(d.id)));
+    return { scope: 'plugin_derived_library', complete_zotero_library: false, snapshot: await this.store.searchRevision(),
+      coverage: { candidates: docs.length, documents: libraryDocs.length, abstracts: docs.filter(d => !!d.abstract).length,
+        fulltext: docs.filter(d => d.hasFulltext).length, vectors: docs.filter(d => d.modelFingerprint === this.modelFingerprint() && d.vectorLayers.length).length,
+        missing_abstracts: docs.filter(d => !d.abstract).length }, queue: { total: jobs.length, states }, credentials: this.credentials.status(),
+      model: { provider: this.settings.embeddingProvider, fingerprint: this.modelFingerprint(), state: this.settings.embeddingProvider === 'local' ? this.inference.state.state : this.embeddingCredentials.status().state },
+      facets: { collections: [...collections].slice(0, 50).map(([id, count]) => ({ id, count })), collections_total: collections.size,
+        tags: [...tags].sort((a, b) => b[1] - a[1]).slice(0, 50).map(([tag, count]) => ({ tag, count })), tags_total: tags.size },
+      workflow: 'Search metadata/abstracts (auto), batch read abstracts, select candidates, search scoped fulltext, read neighbors. Missing abstracts do not imply irrelevance.' };
   }
   async reconcile(ids?: number[]) {
     const scanStarted = new Date().toISOString().slice(0, 19).replace('T', ' ');
@@ -602,6 +722,7 @@ export class Library {
     finally { engine.free?.(); }
   }
   async stop() {
+    this.searchService?.close(); this.queryVectors?.clear();
     this.citations.close();
     this.stopped = true; this.win.clearTimeout(this.timer); this.inference.close();
     for (const controller of this.transfers) controller.abort();

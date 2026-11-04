@@ -8,6 +8,8 @@ export function previewBridge(fixture: any) {
       const job = fixture.status.queue.find((task: any) => task.documentID === doc.id);
       return !!doc.indexedAt || !job || ['done', 'skipped'].includes(job.state);
     }),
+    workspace: async (input: any) => input.action === 'list' ? { workspaces: fixture.workspaces || [], next_offset: null }
+      : fixture.researchDetails?.find((d: any) => d.workspace_id === input.workspace_id && d.theme_id === input.theme_id),
     enqueueSelected: async () => [], search: async ({ query }: any) => ({ results: fixture.documents.filter((d: any) =>
       `${d.title} ${d.creators} ${d.abstract}`.toLowerCase().includes(query.toLowerCase())).map((d: any) => ({ document_id: d.id, snippet: d.abstract })) }),
     read: async (input: any) => { const d = fixture.documents.find((v: any) => v.id === input.document_id); return { title: d.title, text: input.layer === 'abstract' ? d.abstract : undefined, sections: d.sections, metadata: input.layer === 'metadata' ? d : undefined, link: '#', ...(input.layer === 'fulltext' ? readFulltext(d, input) : {}) }; },
